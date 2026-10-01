@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 from instructor import Mode
-from openai import BadRequestError
+from openai import BadRequestError, InternalServerError
 from pydantic import BaseModel
 
 from lib.backends.providers import PROVIDER_OPENAI
@@ -19,10 +19,11 @@ from lib.backends.text_backends.base import (
     TextGenerationRequest,
 )
 from tests.fakes import (
+    ChatCompletionStreamFake,
     bounded_poll_clock,
     captured_openai_clients,
     instructor_api_call_exhausted,
-    patched_instructor_from_openai,
+    patched_async_instructor,
 )
 
 
@@ -41,7 +42,7 @@ def _make_mock_response(content="Hello", input_tokens=10, output_tokens=5):
     response = MagicMock()
     response.choices = [choice]
     response.usage = usage
-    return response
+    return ChatCompletionStreamFake(response)
 
 
 def _make_instructor_client() -> AsyncMock:
@@ -192,6 +193,27 @@ class TestOpenAITextBackend:
         assert result.input_tokens is None
         assert result.output_tokens is None
 
+    async def test_cloudflare_524_is_not_retried(self):
+        error = InternalServerError(
+            message="Error code: 524",
+            response=MagicMock(status_code=524, headers={}),
+            body=None,
+        )
+        mock_client = AsyncMock()
+        mock_client.chat.completions.create = AsyncMock(side_effect=error)
+
+        with (
+            captured_openai_clients(mock_client),
+            bounded_poll_clock(),
+        ):
+            from lib.backends.text_backends.openai import OpenAITextBackend
+
+            backend = OpenAITextBackend(api_key="test-key")
+            with pytest.raises(InternalServerError, match="524"):
+                await backend.generate(TextGenerationRequest(prompt="Hi"))
+
+        assert mock_client.chat.completions.create.call_count == 1
+
 
 def _make_bad_request_error(message: str = "Invalid schema") -> BadRequestError:
     """构造 OpenAI BadRequestError。"""
@@ -210,6 +232,31 @@ class _PersonSchema(BaseModel):
 class TestInstructorFallback:
     """Instructor 降级路径测试。"""
 
+    async def test_cloudflare_524_is_not_retried_in_fallback(self):
+        mock_client = AsyncMock()
+        mock_client.chat.completions.create = AsyncMock(return_value=_make_mock_response("not JSON"))
+        instructor_error = InternalServerError(
+            message="Error code: 524",
+            response=MagicMock(status_code=524, headers={}),
+            body=None,
+        )
+        mock_patched = _make_instructor_client()
+        mock_patched.chat.completions.create_with_completion = AsyncMock(side_effect=instructor_error)
+
+        with (
+            captured_openai_clients(mock_client),
+            patched_async_instructor(return_value=mock_patched),
+            bounded_poll_clock(),
+        ):
+            from lib.backends.text_backends.openai import OpenAITextBackend
+
+            backend = OpenAITextBackend(api_key="test-key")
+            with pytest.raises(InternalServerError, match="524"):
+                await backend.generate(TextGenerationRequest(prompt="Extract info", response_schema=_PersonSchema))
+
+        mock_client.chat.completions.create.assert_awaited_once()
+        mock_patched.chat.completions.create_with_completion.assert_awaited_once()
+
     async def test_native_structured_output_success_no_fallback(self):
         """原生 response_format 成功时，不走 Instructor 降级。"""
         schema_response = json.dumps({"name": "Alice", "age": 30})
@@ -218,7 +265,7 @@ class TestInstructorFallback:
 
         with (
             captured_openai_clients(mock_client),
-            patched_instructor_from_openai() as from_openai,
+            patched_async_instructor() as from_openai,
         ):
             from lib.backends.text_backends.openai import OpenAITextBackend
 
@@ -242,7 +289,7 @@ class TestInstructorFallback:
 
         with (
             captured_openai_clients(mock_client),
-            patched_instructor_from_openai() as from_openai,
+            patched_async_instructor() as from_openai,
         ):
             from lib.backends.text_backends.openai import OpenAITextBackend
 
@@ -291,7 +338,7 @@ class TestInstructorFallback:
 
         with (
             captured_openai_clients(mock_client),
-            patched_instructor_from_openai(return_value=mock_patched),
+            patched_async_instructor(return_value=mock_patched),
             caplog.at_level(logging.WARNING, logger="lib.backends.text_backends.openai"),
         ):
             from lib.backends.text_backends.openai import OpenAITextBackend
@@ -327,7 +374,7 @@ class TestInstructorFallback:
 
         with (
             captured_openai_clients(mock_client),
-            patched_instructor_from_openai(return_value=mock_patched) as from_openai,
+            patched_async_instructor(return_value=mock_patched) as from_openai,
         ):
             from lib.backends.text_backends.openai import OpenAITextBackend
 
@@ -345,7 +392,9 @@ class TestInstructorFallback:
         assert result.output_tokens == 80
         mock_client.chat.completions.create.assert_awaited_once()
         # 降级复用同一个客户端、从 TOOLS 档起步，并把原生调用的 model / messages 原样交给 Instructor
-        from_openai.assert_called_once_with(mock_client, mode=Mode.TOOLS)
+        assert from_openai.call_count == 1
+        assert from_openai.call_args.kwargs["client"] is mock_client
+        assert from_openai.call_args.kwargs["mode"] == Mode.TOOLS
         fallback_kwargs = mock_patched.chat.completions.create_with_completion.call_args.kwargs
         assert fallback_kwargs["model"] == "gpt-5.4-mini"
         assert fallback_kwargs["messages"] == [{"role": "user", "content": "Extract info"}]
@@ -371,7 +420,7 @@ class TestInstructorFallback:
 
         with (
             captured_openai_clients(mock_client),
-            patched_instructor_from_openai(return_value=mock_patched),
+            patched_async_instructor(return_value=mock_patched),
         ):
             from lib.backends.text_backends.openai import OpenAITextBackend
 
@@ -410,7 +459,7 @@ class TestInstructorFallback:
 
         with (
             captured_openai_clients(mock_client),
-            patched_instructor_from_openai(return_value=mock_patched),
+            patched_async_instructor(return_value=mock_patched),
         ):
             from lib.backends.text_backends.openai import OpenAITextBackend
 
@@ -446,7 +495,7 @@ class TestInstructorFallback:
 
         with (
             captured_openai_clients(mock_client),
-            patched_instructor_from_openai(return_value=mock_patched),
+            patched_async_instructor(return_value=mock_patched),
         ):
             from lib.backends.text_backends.openai import OpenAITextBackend
 
@@ -473,7 +522,7 @@ class TestInstructorFallback:
 
         with (
             captured_openai_clients(mock_client),
-            patched_instructor_from_openai() as from_openai,
+            patched_async_instructor() as from_openai,
         ):
             from lib.backends.text_backends.openai import OpenAITextBackend
 
@@ -508,7 +557,7 @@ class TestInstructorFallback:
 
         with (
             captured_openai_clients(mock_client),
-            patched_instructor_from_openai(return_value=mock_patched) as from_openai,
+            patched_async_instructor(return_value=mock_patched) as from_openai,
         ):
             from lib.backends.text_backends.openai import OpenAITextBackend
 
@@ -524,7 +573,9 @@ class TestInstructorFallback:
         assert result.input_tokens == 20
         assert result.output_tokens == 10
         # 降级复用同一个客户端、从 TOOLS 档起步，并把原生调用的 model / messages 原样交给 Instructor
-        from_openai.assert_called_once_with(mock_client, mode=Mode.TOOLS)
+        assert from_openai.call_count == 1
+        assert from_openai.call_args.kwargs["client"] is mock_client
+        assert from_openai.call_args.kwargs["mode"] == Mode.TOOLS
         fallback_kwargs = mock_patched.chat.completions.create_with_completion.call_args.kwargs
         assert fallback_kwargs["model"] == "gpt-5.4-mini"
         assert fallback_kwargs["messages"] == [{"role": "user", "content": "Extract info"}]
@@ -545,7 +596,7 @@ class TestInstructorFallback:
 
         with (
             captured_openai_clients(mock_client),
-            patched_instructor_from_openai(return_value=mock_patched) as mock_from_openai,
+            patched_async_instructor(return_value=mock_patched) as mock_from_openai,
         ):
             from lib.backends.text_backends.openai import OpenAITextBackend
 
@@ -576,7 +627,7 @@ class TestInstructorFallback:
 
         with (
             captured_openai_clients(mock_client),
-            patched_instructor_from_openai(side_effect=[tools_patched, md_json_patched]) as mock_from_openai,
+            patched_async_instructor(side_effect=[tools_patched, md_json_patched]) as mock_from_openai,
         ):
             from lib.backends.text_backends.openai import OpenAITextBackend
 
@@ -794,7 +845,7 @@ class TestMaxOutputTokens:
 
         with (
             captured_openai_clients(mock_client),
-            patched_instructor_from_openai(return_value=mock_patched),
+            patched_async_instructor(return_value=mock_patched),
         ):
             from lib.backends.text_backends.openai import OpenAITextBackend
 

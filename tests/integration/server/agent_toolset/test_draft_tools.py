@@ -638,6 +638,73 @@ async def test_patch_draft_supports_multiple_rounds_and_rejects_stale_revision(f
     assert draft_of(second)["content"]["units"][0]["text"] == "@[张三] 在 @[村口] 停下"
 
 
+async def test_patch_draft_edits_one_field_without_resending_other_units(fake_ctx: ToolHarness) -> None:
+    rv_source(fake_ctx)
+    write_rv_script_plan(fake_ctx, [rv_saved_unit("@[张三] 起身"), rv_saved_unit("@[张三] 走向 @[村口]")])
+    opened = draft_of(await open_for_edit(fake_ctx, source="source/episode_1.txt"))
+    expected = copy.deepcopy(opened["content"])
+    expected["units"][0]["text"] = "@[张三] 在 @[村口] 停下"
+    args = {
+        "episode_id": 1,
+        "doc_type": "reference_script_plan",
+        "base_revision": opened["revision"],
+        "edits": [{"path": ["units", 0, "text"], "value": expected["units"][0]["text"]}],
+    }
+
+    patched = draft_of(await run_declared_tool("patch_draft", fake_ctx, args))
+
+    assert patched["content"] == expected
+    assert patched["revision"] != opened["revision"]
+    stale = await run_declared_tool("patch_draft", fake_ctx, args)
+    assert problem_of(stale).code == "revision_conflict"
+    assert draft_of(await open_for_edit(fake_ctx))["content"] == expected
+
+
+@pytest.mark.parametrize(
+    "path",
+    [[], [True], ["units", -1], ["units", "0"], ["units", 99], ["units", 0, "missing"], ["units", 0, "text", 0]],
+)
+async def test_patch_draft_invalid_edit_rejects_entire_batch(fake_ctx: ToolHarness, path: list) -> None:
+    rv_source(fake_ctx)
+    write_rv_script_plan(fake_ctx, [rv_saved_unit("@[张三] 起身")])
+    opened = draft_of(await open_for_edit(fake_ctx, source="source/episode_1.txt"))
+    before = rv_quarantine_path(fake_ctx).read_bytes()
+
+    result = await run_declared_tool(
+        "patch_draft",
+        fake_ctx,
+        {
+            "episode_id": 1,
+            "doc_type": "reference_script_plan",
+            "base_revision": opened["revision"],
+            "edits": [
+                {"path": ["units", 0, "text"], "value": "@[张三] 在 @[村口] 停下"},
+                {"path": path, "value": "invalid"},
+            ],
+        },
+    )
+
+    assert problem_of(result).code == "invalid_request"
+    assert rv_quarantine_path(fake_ctx).read_bytes() == before
+
+
+@pytest.mark.parametrize("update", [{}, {"edits": []}, {"content": {}, "edits": [{"path": ["units"], "value": []}]}])
+async def test_patch_draft_requires_one_update_mode(fake_ctx: ToolHarness, update: dict) -> None:
+    rv_source(fake_ctx)
+    write_rv_script_plan(fake_ctx, [rv_saved_unit("@[张三] 起身")])
+    opened = draft_of(await open_for_edit(fake_ctx, source="source/episode_1.txt"))
+    before = rv_quarantine_path(fake_ctx).read_bytes()
+
+    result = await run_declared_tool(
+        "patch_draft",
+        fake_ctx,
+        {"episode_id": 1, "doc_type": "reference_script_plan", "base_revision": opened["revision"], **update},
+    )
+
+    assert problem_of(result).code == "invalid_request"
+    assert rv_quarantine_path(fake_ctx).read_bytes() == before
+
+
 @pytest.mark.parametrize(
     "doc_type",
     ["drama_script_plan", "narration_script_plan", "reference_script_plan", "reference_prompt_authoring"],

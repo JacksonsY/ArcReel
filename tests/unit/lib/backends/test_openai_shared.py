@@ -1,6 +1,10 @@
-"""create_openai_client 客户端工厂行为。"""
+"""OpenAI 共享重试与客户端工厂行为。"""
 
-from lib.backends.openai_shared import create_openai_client
+from unittest.mock import MagicMock
+
+from openai import InternalServerError
+
+from lib.backends.openai_shared import create_openai_client, should_retry_openai_text_generation
 from lib.config.url_utils import OFFICIAL_OPENAI_BASE_URL
 
 
@@ -23,3 +27,21 @@ class TestCreateOpenAIClientBaseURL:
         monkeypatch.setenv("OPENAI_BASE_URL", "https://relay.example.com/v1")
         client = create_openai_client(api_key="x", base_url="https://vllm.internal:8000/v1")
         assert str(client.base_url).rstrip("/") == "https://vllm.internal:8000/v1"
+
+
+class TestOpenAIRetry:
+    def test_generation_524_is_not_retried(self):
+        error = InternalServerError(
+            message="Error code: 524",
+            response=MagicMock(status_code=524, headers={}),
+            body=None,
+        )
+        assert should_retry_openai_text_generation(error) is False
+
+    def test_other_transient_server_errors_still_retry(self):
+        error = InternalServerError(
+            message="Error code: 502",
+            response=MagicMock(status_code=502, headers={}),
+            body=None,
+        )
+        assert should_retry_openai_text_generation(error) is True

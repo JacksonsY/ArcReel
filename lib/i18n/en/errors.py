@@ -25,6 +25,7 @@ MESSAGES = {
     "operation_draft_finish": "This draft is editable; preserve existing edits, then call {tool} to validate and promote it.",
     "operation_draft_action": "Draft: {path}. {action}",
     "operation_episode_source_location": "Episode source location: {path}; plan_episodes creates source text for planned episodes.",
+    "text_stream_incomplete": "The model response stream was interrupted or had no finish marker. The result is incomplete. Automatic retries stopped; check the provider records before retrying.",
     "project_migration_failed": "Project '{name}' has not finished its data upgrade, so generation is unavailable. Reason: {reason}. Repair it in the agent conversation, then retry the upgrade",
     "project_not_found": "Project '{name}' does not exist or is not initialized",
     "resource_not_found": "The requested resource does not exist",

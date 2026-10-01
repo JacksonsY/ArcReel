@@ -101,10 +101,12 @@ mcp__arcreel__generate_script_plan({"episode_id": N, "source": "source/episode_N
 
 ### 情况 C：处置在场草稿
 
+局部修复用 `edits`：`path` 从 `content` 根开始，对象键用字符串、数组下标用从 0 开始的整数，`value` 为该字段的新值。按实际改动选择字段，可一次提交多项；不要回传未改动的整份正文。增删条目时替换对应数组；只有整份重写或需补建缺失字段时才用完整 `content`，它与 `edits` 二选一。路径不存在或 revision 冲突时整批拒绝，重新 open 后再修改。
+
 **触发**：`drafts/episode_{N}/script_plan_normalized_script.invalid.json` 存在，不论正式 JSON 是否存在。
 
 1. 调用 `mcp__arcreel__open_draft({"episode_id": N, "doc_type": "drama_script_plan"})` 取得草稿 `content`、`violations` 与 `revision`。保留草稿中已有修改；如主 Agent 本轮传入用户修改意见，先应用该意见；`violations[]` 非空时，在上述修改基础上修复草稿 `content` 中对应字段
-2. 调用 `mcp__arcreel__patch_draft({"episode_id": N, "doc_type": "drama_script_plan", "content": <完整修改后正文>, "base_revision": "<open_draft 返回的 revision>"})`，记下它返回的新 `revision`
+2. 调用 `mcp__arcreel__patch_draft({"episode_id": N, "doc_type": "drama_script_plan", "edits": [{"path": ["scenes", i, "scene_description"], "value": <修改后字段值>}], "base_revision": "<open_draft 返回的 revision>"})`，记下它返回的新 `revision`
 3. 调用 `mcp__arcreel__promote_draft({"episode_id": N, "doc_type": "drama_script_plan", "base_revision": "<patch_draft 返回的新 revision>"})` 全量校验并晋升；仍返回违约报告时继续 open → patch → promote
 
 晋升成功后正式 `script_plan_normalized_script.json` 落盘、草稿自动清除。草稿在场期间内容确认被阻塞，必须处置完成。
@@ -127,7 +129,7 @@ mcp__arcreel__open_draft({"episode_id": N, "doc_type": "drama_script_plan", "sou
 
 **Step 2**: 根据主 Agent 传入的修改要求编辑草稿
 
-修改返回的 `content.scenes[i]`（保持合法 JSON 结构），再用返回的 `revision` 调用 `patch_draft` 提交完整 `content`：
+修改返回的 `content.scenes[i]`（保持合法 JSON 结构），再用返回的 `revision` 调用 `patch_draft` 用 `edits` 仅提交改动字段：
 - 修改 `scene_description`（视觉改编内容）
 - 调整 `duration_seconds`
 - 更改 `segment_break` 标记
@@ -139,7 +141,7 @@ mcp__arcreel__open_draft({"episode_id": N, "doc_type": "drama_script_plan", "sou
 **Step 3**: 晋升回正式文件
 
 ```text
-mcp__arcreel__patch_draft({"episode_id": N, "doc_type": "drama_script_plan", "content": <完整修改后正文>, "base_revision": "<open_draft 返回的 revision>"})
+mcp__arcreel__patch_draft({"episode_id": N, "doc_type": "drama_script_plan", "edits": [{"path": ["scenes", i, "scene_description"], "value": <修改后字段值>}], "base_revision": "<open_draft 返回的 revision>"})
 mcp__arcreel__promote_draft({"episode_id": N, "doc_type": "drama_script_plan", "base_revision": "<patch_draft 返回的新 revision>"})
 ```
 

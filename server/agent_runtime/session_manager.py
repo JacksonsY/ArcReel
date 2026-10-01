@@ -38,6 +38,7 @@ from server.agent_runtime.message_serialization import (
     message_to_dict,
     utc_now_iso,
 )
+from server.agent_runtime.message_utils import is_injected_message
 from server.agent_runtime.models import (
     Heartbeat,
     LiveMessage,
@@ -1204,6 +1205,12 @@ class SessionManager:
 
     async def _finalize_turn(self, managed: ManagedSession, result_msg: dict[str, Any]) -> None:
         """Settle session state after a result message completes a turn."""
+        if is_injected_message(result_msg):
+            try:
+                await self._record_assistant_usage(managed, result_msg, resolve_result_status(result_msg))
+            except Exception:
+                logger.exception("记录后台轮次 assistant usage 失败 session_id=%s", managed.session_id)
+            return
         self._drain_pending_user_echoes(managed, "turn finalized")
         managed.cancel_pending_questions("session completed")
         explicit = str(result_msg.get("session_status") or "").strip()

@@ -73,11 +73,12 @@ BASE_VARIABLES = frozenset(
         "seed",
         "width",
         "height",
+        "generation_type",
     }
 )
 
 #: 视频定义里只能做枚举映射的变量：供应商侧改名的都是这几个档位参数，prompt 之类改名没有意义。
-ENUM_MAP_VARIABLES = frozenset({"duration", "aspect_ratio", "resolution", "generate_audio"})
+ENUM_MAP_VARIABLES = frozenset({"duration", "aspect_ratio", "resolution", "generate_audio", "generation_type"})
 
 #: 视频定义里可声明缺省值的变量与各自的宿主类型：调用方可以不填的那几个档位参数。base_url /
 #: model / prompt 每次调用都带，width / height 由比例与分辨率派生，给它们声明缺省值只会掩盖
@@ -334,9 +335,11 @@ class _SemanticChecker:
 
     def run(self) -> None:
         self._check_auth_section()
-        for section in ("submit", "poll", "result"):
+        for section in ("upload", "submit", "poll", "result"):
             if section in self._document:
                 self._check_request(section)
+        if any(item.get("encoding") == "upload" for item in self._inputs.values()) and "upload" not in self._document:
+            self._error("upload", DefinitionErrorCode.MISSING_FIELD, field="upload")
         self._check_enum_maps()
         self._check_defaults()
         self._check_status_map()

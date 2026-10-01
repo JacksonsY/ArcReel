@@ -22,6 +22,27 @@
     },
     "meta": { "$ref": "#/$defs/meta" },
     "auth": { "$ref": "#/$defs/auth" },
+    "upload": {
+      "description": "encoding=upload 的素材在提交前逐个上传，复用 auth；将响应里的 url 作为 inputs 值。",
+      "type": "object",
+      "required": ["method", "url", "field", "extract"],
+      "additionalProperties": false,
+      "properties": {
+        "method": { "const": "POST" },
+        "url": { "$ref": "#/$defs/urlTemplate" },
+        "headers": { "$ref": "#/$defs/headerMap" },
+        "field": { "type": "string", "minLength": 1 },
+        "extract": {
+          "type": "object",
+          "required": ["url"],
+          "additionalProperties": false,
+          "properties": {
+            "url": { "$ref": "#/$defs/extractSpec" },
+            "error": { "$ref": "#/$defs/extractSpec" }
+          }
+        }
+      }
+    },
     "inputs": {
       "description": "素材输入声明：把请求里的素材编码成模板可引用的值。模板里以 inputs.<名字> 引用；列表型素材只能经 $each 展开。",
       "type": "object",
@@ -211,8 +232,8 @@
           "enum": ["start_image", "end_image", "reference_images", "reference_audio_files"]
         },
         "encoding": {
-          "description": "素材编码方式：data_uri 或裸 base64。素材格式不做白名单，由供应商在提交时拒绝。",
-          "enum": ["data_uri", "base64"]
+          "description": "data_uri、裸 base64，或 upload：先经 upload 节上传取得 HTTP(S) URL。",
+          "enum": ["data_uri", "base64", "upload"]
         },
         "required": {
           "description": "该素材是否是此请求形状的必需输入。缺省 false 表示可选；必需图输入会让 text_to_video 推导为 false。",

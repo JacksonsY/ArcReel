@@ -9,10 +9,10 @@ import pytest
 from lib.backends.providers import PROVIDER_MINIMAX, PROVIDER_OPENAI
 from lib.billing.pricing.lookup import lookup_pricing
 from lib.billing.pricing.strategies import PricingParams, calculate_pricing
-from tests.fakes import captured_openai_clients
+from tests.fakes import ChatCompletionStreamFake, captured_openai_clients
 
 
-def _text_response(content: str = "ok", in_tok: int = 10, out_tok: int = 5) -> MagicMock:
+def _text_response(content: str = "ok", in_tok: int = 10, out_tok: int = 5) -> ChatCompletionStreamFake:
     usage = MagicMock()
     usage.prompt_tokens = in_tok
     usage.completion_tokens = out_tok
@@ -24,7 +24,7 @@ def _text_response(content: str = "ok", in_tok: int = 10, out_tok: int = 5) -> M
     response = MagicMock()
     response.choices = [choice]
     response.usage = usage
-    return response
+    return ChatCompletionStreamFake(response)
 
 
 class TestRegistry:

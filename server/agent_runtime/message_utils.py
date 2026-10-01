@@ -3,6 +3,13 @@
 from typing import Any
 
 
+def is_injected_message(message: dict[str, Any]) -> bool:
+    """SDK 自发触发的轮次（后台通知等），不属于应用提交的用户输入。"""
+    origin = message.get("origin")
+    kind = origin.get("kind") if isinstance(origin, dict) else None
+    return isinstance(kind, str) and kind != "human"
+
+
 def _extract_text_from_block(block: Any) -> str | None:
     """Return stripped text from a content block dict, or None."""
     if not isinstance(block, dict):

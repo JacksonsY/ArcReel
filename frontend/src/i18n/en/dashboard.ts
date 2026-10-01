@@ -2570,6 +2570,7 @@ export default {
   'ce_input_source_reference_audio_files': 'Reference audio',
   'ce_input_encoding_data_uri': 'base64 data URI',
   'ce_input_encoding_base64': 'Bare base64',
+  'ce_input_encoding_upload': 'Upload to URL (configure upload in JSON)',
   'ce_section_submit': 'Submit the job',
   'ce_section_submit_desc': 'The request that starts a generation, and where to read the task ID from its response.',
   'ce_request_method': 'Method',

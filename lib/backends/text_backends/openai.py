@@ -6,7 +6,7 @@ import logging
 
 from openai import AsyncOpenAI, BadRequestError
 
-from lib.backends.openai_shared import OPENAI_RETRYABLE_ERRORS, create_openai_client
+from lib.backends.openai_shared import create_openai_client, should_retry_openai_text_generation
 from lib.backends.providers import PROVIDER_OPENAI
 from lib.backends.text_backends.base import (
     TextCapability,
@@ -20,6 +20,7 @@ from lib.backends.text_backends.base import (
     structured_fallback_reason,
     truncate_for_log,
 )
+from lib.backends.text_backends.openai_stream import create_streamed_completion
 from lib.config.url_utils import is_official_openai_base_url
 from lib.infra.logging_utils import format_kwargs_for_log
 from lib.infra.retry import with_retry_async
@@ -113,7 +114,7 @@ class OpenAITextBackend:
 
         return native
 
-    @with_retry_async(max_attempts=4, backoff_seconds=(2, 4, 8), retryable_errors=OPENAI_RETRYABLE_ERRORS)
+    @with_retry_async(max_attempts=4, backoff_seconds=(2, 4, 8), retry_if=should_retry_openai_text_generation)
     async def _generate_native(
         self, request: TextGenerationRequest, messages: list[dict]
     ) -> TextGenerationResult | None:
@@ -138,9 +139,9 @@ class OpenAITextBackend:
                 },
             }
 
-        logger.info("调用 %s 文本 SDK kwargs=%s", self.name, format_kwargs_for_log(kwargs))
+        logger.info("调用 %s 文本 SDK（流式）kwargs=%s", self.name, format_kwargs_for_log(kwargs))
         try:
-            response = await self._client.chat.completions.create(**kwargs)
+            response = await create_streamed_completion(self._client, **kwargs)
         except Exception as exc:
             if request.response_schema and _is_schema_error(exc):
                 logger.warning(
@@ -231,7 +232,7 @@ def _is_schema_error(exc: BaseException) -> bool:
     return any(kw in error_str for kw in _SCHEMA_ERROR_KEYWORDS)
 
 
-@with_retry_async(max_attempts=4, backoff_seconds=(2, 4, 8), retryable_errors=OPENAI_RETRYABLE_ERRORS)
+@with_retry_async(max_attempts=4, backoff_seconds=(2, 4, 8), retry_if=should_retry_openai_text_generation)
 async def _instructor_fallback(
     client: AsyncOpenAI,
     model: str,

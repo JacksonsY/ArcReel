@@ -8,9 +8,9 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any, Literal, NamedTuple, Protocol, cast
+from typing import Annotated, Any, Literal, NamedTuple, Protocol, Self, cast
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StrictStr, ValidationError, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
 from lib.artifacts.artifact_manifest import ArtifactBasis
@@ -128,10 +128,27 @@ class DraftLocator(_DraftRequest):
     )
 
 
+class DraftContentEdit(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    path: list[StrictStr | Annotated[int, Field(strict=True, ge=0)]] = Field(
+        min_length=1,
+        description='从 content 根开始的已有字段路径；对象键用字符串，数组下标用整数，如 ["units", 0, "text"]',
+    )
+    value: Any = Field(description="该字段替换后的完整值；未指定的字段保持不变")
+
+
 class PatchDraftRequest(_DraftRequest):
     """``accept_formal_revision`` 与 ``source`` 以「是否出现」区分省略与显式 null：省略即不接受 / 不改。"""
 
-    content: dict[str, Any] = Field(description="替换后的完整草稿正文；允许中间态不通过业务校验")
+    content: dict[str, Any] | SkipJsonSchema[None] = Field(
+        default=None, description="替换后的完整草稿正文；仅整份改写时提供，与 edits 二选一"
+    )
+    edits: list[DraftContentEdit] | SkipJsonSchema[None] = Field(
+        default=None,
+        min_length=1,
+        description="局部修改优先使用：按顺序替换已有字段，无需回传整份草稿；与 content 二选一，允许业务校验中间态",
+    )
     base_revision: str = Field(description=_DRAFT_REVISION_DESCRIPTION)
     accept_formal_revision: str | None = Field(
         default=None,
@@ -144,6 +161,12 @@ class PatchDraftRequest(_DraftRequest):
         default=None,
         description="可选源文范围；仅在修正 script_plan 草稿的重判范围时提供，null 清除范围，省略则保持不变",
     )
+
+    @model_validator(mode="after")
+    def _require_one_content_update(self) -> Self:
+        if (self.content is None) == (self.edits is None):
+            raise ValueError("provide exactly one of content or edits")
+        return self
 
 
 class PromoteDraftRequest(_DraftRequest):
@@ -1254,13 +1277,14 @@ class DraftWorkflow:
         self,
         episode: int,
         resolved: str,
-        content: dict[str, Any],
+        content: dict[str, Any] | None,
         base_revision: str,
         accept_formal_revision: str | None,
         accepts_formal_revision: bool,
         source: str | None,
         updates_source: bool,
         before_commit: Callable[[], None] | None,
+        edits: list[DraftContentEdit] | None,
     ) -> dict[str, Any]:
         path = quarantine_path(self.ctx.project_path, episode, resolved)
         draft = read_quarantine(self.ctx.project_path, episode, resolved)
@@ -1273,6 +1297,21 @@ class DraftWorkflow:
                 f"draft revision changed: expected {base_revision}, actual {actual_revision}",
             )
         self._reject_confirmed_script_plan_edit(episode, resolved, draft)
+        if content is None:
+            content = draft.content
+            for edit in edits or []:
+                target: Any = content
+                for index, key in enumerate(edit.path):
+                    exists = (isinstance(target, dict) and isinstance(key, str) and key in target) or (
+                        isinstance(target, list) and isinstance(key, int) and 0 <= key < len(target)
+                    )
+                    if not exists:
+                        raise DraftWorkflowError("invalid_request", f"edit path does not exist: {edit.path!r}")
+                    container = cast(Any, target)
+                    if index == len(edit.path) - 1:
+                        container[key] = edit.value
+                    else:
+                        target = container[key]
         meta = draft.meta
         if updates_source:
             if resolved == QUARANTINE_KIND_PROMPT_AUTHORING:
@@ -1306,7 +1345,7 @@ class DraftWorkflow:
         self,
         episode: int,
         doc_type: str,
-        content: dict[str, Any],
+        content: dict[str, Any] | None,
         base_revision: str,
         accept_formal_revision: str | None = None,
         accepts_formal_revision: bool = False,
@@ -1314,6 +1353,7 @@ class DraftWorkflow:
         updates_source: bool = False,
         *,
         before_commit: Callable[[], None] | None = None,
+        edits: list[DraftContentEdit] | None = None,
     ) -> dict[str, Any]:
         resolved = await self._kind(episode, doc_type)
         path = quarantine_path(self.ctx.project_path, episode, resolved)
@@ -1329,6 +1369,7 @@ class DraftWorkflow:
                 source,
                 updates_source,
                 before_commit,
+                edits,
             )
 
     async def promote(

@@ -51,6 +51,75 @@ def _request(tmp_path: Path, **overrides) -> VideoGenerationRequest:
 
 
 class TestDeclarativeVideoBackend:
+    @pytest.mark.parametrize(("source", "mode"), [("start_image", "first-frame"), ("reference_images", "reference")])
+    @pytest.mark.parametrize("upload_outcome", ["ok", "http_error", "missing_url", "data_uri"])
+    async def test_uploads_local_images_before_submitting_urls(
+        self, tmp_path: Path, source: str, mode: str, upload_outcome: str
+    ):
+        definition = _definition()
+        definition["inputs"] = {"image": {"source": source, "encoding": "upload"}}
+        definition["upload"] = {
+            "method": "POST",
+            "url": "{{ base_url }}/v1/files",
+            "field": "file",
+            "extract": {"url": ["$.url"]},
+        }
+        definition["enum_maps"] = {
+            "generation_type": {"i2v": "first-frame", "r2v": "reference", "t2v": "text-to-video"}
+        }
+        definition["capabilities"] = {
+            "first_frame": source == "start_image",
+            "max_reference_images": 30 if source == "reference_images" else 0,
+        }
+        image_value = (
+            "{{ inputs.image }}"
+            if source == "start_image"
+            else {"$each": {"in": "inputs.image", "as": "image", "item": "{{ image }}"}}
+        )
+        definition["submit"]["body"] = {"mode": "{{ generation_type }}", "images": [image_value]}
+        assert validate_definition(definition).valid
+        image = tmp_path / "reference.png"
+        image.write_bytes(b"image-bytes")
+        response_body = {"url": "https://cdn.test/ref.png"}
+        if upload_outcome == "missing_url":
+            response_body = {}
+        elif upload_outcome == "data_uri":
+            response_body = {"url": "data:image/png;base64,abc"}
+        with capture_http() as router, bounded_poll_clock():
+            upload = router.post("https://relay.test/v1/files").mock(
+                return_value=httpx.Response(500 if upload_outcome == "http_error" else 200, json=response_body)
+            )
+            submit = router.post("https://relay.test/v1/video/create").mock(
+                return_value=httpx.Response(200, json={"task_id": "job-42"})
+            )
+            router.get("https://relay.test/v1/video/fetch/job-42").mock(
+                return_value=httpx.Response(200, json={"status": "completed", "video_url": "https://cdn.test/out.mp4"})
+            )
+            router.get("https://cdn.test/out.mp4").mock(return_value=httpx.Response(200, content=b"video"))
+            backend = DeclarativeVideoBackend(
+                api_key="secret",
+                base_url="https://relay.test",
+                model="video-x",
+                definition=definition,
+                provider="custom-1",
+            )
+            request = _request(tmp_path, **{source: [image] if source == "reference_images" else image})
+            if upload_outcome != "ok":
+                with pytest.raises(
+                    httpx.HTTPStatusError if upload_outcome == "http_error" else DeclarativeRuntimeError
+                ):
+                    await backend.generate(request)
+                assert submit.call_count == 0
+                return
+            result = await backend.generate(request)
+            await backend.resume_video("job-42", request)
+        assert result.video_path.read_bytes() == b"video"
+        assert upload.call_count == 1
+        assert b"image-bytes" in upload.calls.last.request.content
+        assert 'name="file"' in upload.calls.last.request.content.decode()
+        assert upload.calls.last.request.headers["Authorization"] == "Bearer secret"
+        assert request_json(submit.calls.last.request) == {"mode": mode, "images": ["https://cdn.test/ref.png"]}
+
     async def test_definition_drives_submit_poll_download_and_usage(self, tmp_path: Path):
         with capture_http() as router, bounded_poll_clock():
             submit = router.post("https://relay.test/v1/video/create").mock(

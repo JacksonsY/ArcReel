@@ -12,6 +12,9 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from server.agent_runtime.message_serialization import message_to_dict
+from server.agent_runtime.message_utils import is_injected_message
+
 
 class _ActorClosed(Exception):
     """Sentinel: actor 已退出（正常或异常），队列中剩余命令以此标记为 error。"""
@@ -123,15 +126,25 @@ class SessionActor:
         msg_task = asyncio.create_task(msg_iter.__anext__(), name="actor-recv")
         cmd_task = asyncio.create_task(self._cmd_queue.get(), name="actor-cmd")
         pending_query: SessionCommand | None = None
+        injected_result = False
         try:
             while True:
                 done, _ = await asyncio.wait({msg_task, cmd_task}, return_when=asyncio.FIRST_COMPLETED)
 
                 if msg_task in done:
                     try:
-                        self._on_message(msg_task.result())
+                        message = msg_task.result()
+                        payload = message_to_dict(message)
+                        injected_result = payload.get("type") == "result" and is_injected_message(payload)
+                        self._on_message(message)
                         msg_task = asyncio.create_task(msg_iter.__anext__())
                     except StopAsyncIteration:
+                        if injected_result:
+                            # receive_response 在任一 result 处结束；后台轮次不结束当前 query。
+                            msg_iter = client.receive_response().__aiter__()
+                            msg_task = asyncio.create_task(msg_iter.__anext__(), name="actor-recv")
+                            injected_result = False
+                            continue
                         query_cmd.done.set()
                         if pending_query is not None:
                             # 若 cmd_task 又 race 到下一条命令，回塞到队列避免丢失

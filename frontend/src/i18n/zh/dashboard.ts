@@ -2569,6 +2569,7 @@ export default {
   'ce_input_source_reference_audio_files': '参考音频',
   'ce_input_encoding_data_uri': 'base64 data URI',
   'ce_input_encoding_base64': '裸 base64',
+  'ce_input_encoding_upload': '上传后使用 URL（在 JSON 中配置 upload）',
   'ce_section_submit': '提交生成任务',
   'ce_section_submit_desc': '发起生成的请求，以及从其响应中读取任务 ID 的位置。',
   'ce_request_method': '请求方法',

@@ -43,6 +43,7 @@ from server.agent_runtime.event_log import (
     build_user_entry,
 )
 from server.agent_runtime.keyed_locks import KeyedLocks
+from server.agent_runtime.message_utils import is_injected_message
 from server.agent_runtime.models import Heartbeat, LiveMessage, SessionMeta, SessionStatus, SubscriptionReady
 from server.agent_runtime.result_status import resolve_result_status
 from server.agent_runtime.sdk_transcript_adapter import SdkTranscriptAdapter
@@ -828,7 +829,7 @@ class AssistantService:
                         break
                     continue
 
-                if msg_type == "result":
+                if msg_type == "result" and not is_injected_message(message):
                     pending_result = message
                     continue
 

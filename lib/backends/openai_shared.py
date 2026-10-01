@@ -18,6 +18,7 @@ import logging
 from openai import AsyncOpenAI
 
 from lib.config.url_utils import OFFICIAL_OPENAI_BASE_URL
+from lib.infra.retry import _should_retry
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,13 @@ try:
     )
 except ImportError:
     pass  # openai 是必装依赖，此分支仅作防御性保护；回退到空 tuple
+
+
+def should_retry_openai_text_generation(exc: Exception) -> bool:
+    """文本生成收到 Cloudflare 524 时不重放，避免源站仍在处理时重复生成。"""
+    if getattr(exc, "status_code", None) == 524:
+        return False
+    return _should_retry(exc, OPENAI_RETRYABLE_ERRORS)
 
 
 def create_openai_client(

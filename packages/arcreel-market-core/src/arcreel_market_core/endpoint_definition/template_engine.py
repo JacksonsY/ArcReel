@@ -83,6 +83,7 @@ def build_context(
     defaults: Mapping[str, object] | None = None,
     *,
     media_type: str = DEFAULT_DECLARATIVE_MEDIA_TYPE,
+    input_declarations: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, object]:
     """补齐模板保留变量；宽高只由比例与分辨率派生，分辨率档位按 ``media_type`` 换算。
 
@@ -94,6 +95,12 @@ def build_context(
         if context.get(name) is None:
             context[name] = value
     context["inputs"] = dict(inputs or {})
+    present_sources = {
+        declaration["source"] for name, declaration in (input_declarations or {}).items() if (inputs or {}).get(name)
+    }
+    context["generation_type"] = (
+        "r2v" if "reference_images" in present_sources else "i2v" if "start_image" in present_sources else "t2v"
+    )
     aspect_ratio = context.get("aspect_ratio")
     if isinstance(aspect_ratio, str):
         resolution = context.get("resolution")

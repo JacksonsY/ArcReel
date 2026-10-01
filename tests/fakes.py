@@ -691,17 +691,63 @@ def captured_openai_clients(client: Any = None) -> Generator[list[dict[str, Any]
         yield created
 
 
-@contextmanager
-def patched_instructor_from_openai(patched: Any = None, **patch_kwargs: Any) -> Generator[Any]:
-    """在 SDK 边界替换 ``instructor.from_openai``，yield 该替身，供测试断言传给 ``from_openai`` 的参数。
+class ChatCompletionStreamFake:
+    """把既有 completion 替身作为流返回，仍允许用例设置 usage 和 finish_reason。"""
 
-    *patched* 是 ``from_openai`` 返回的 instructor 客户端；省略时返回默认替身。
-    其余关键字参数（``return_value`` / ``side_effect``）原样交给 ``patch``。
-    """
-    with patch("instructor.from_openai", **patch_kwargs) as from_openai:
-        if patched is not None:
-            from_openai.return_value = patched
-        yield from_openai
+    def __init__(self, completion: Any):
+        self.choices = completion.choices
+        self.usage = completion.usage
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return False
+
+    async def __aiter__(self):
+        from openai.types.chat import ChatCompletionChunk
+
+        for index, choice in enumerate(self.choices):
+            delta: dict[str, Any] = {"role": "assistant", "content": choice.message.content}
+            tool_calls = getattr(choice.message, "tool_calls", None)
+            if isinstance(tool_calls, list):
+                delta["tool_calls"] = [{"index": i, **call.model_dump()} for i, call in enumerate(tool_calls)]
+            finish = getattr(choice, "finish_reason", None)
+            yield ChatCompletionChunk.model_validate(
+                {
+                    "id": "chat-test",
+                    "object": "chat.completion.chunk",
+                    "created": 1,
+                    "model": "test",
+                    "choices": [
+                        {"index": index, "delta": delta, "finish_reason": finish if isinstance(finish, str) else "stop"}
+                    ],
+                }
+            )
+        if self.usage is not None:
+            prompt = self.usage.prompt_tokens
+            completion = self.usage.completion_tokens
+            yield ChatCompletionChunk.model_validate(
+                {
+                    "id": "chat-test",
+                    "object": "chat.completion.chunk",
+                    "created": 1,
+                    "model": "test",
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": prompt,
+                        "completion_tokens": completion,
+                        "total_tokens": prompt + completion,
+                    },
+                }
+            )
+
+
+@contextmanager
+def patched_async_instructor(**patch_kwargs: Any) -> Generator[Any]:
+    """在 SDK 构造边界替换流式 Instructor 客户端。"""
+    with patch("instructor.AsyncInstructor", **patch_kwargs) as client:
+        yield client
 
 
 @contextmanager

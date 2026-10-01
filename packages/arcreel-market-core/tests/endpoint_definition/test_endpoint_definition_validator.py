@@ -16,6 +16,21 @@ from arcreel_market_core.endpoint_definition import (
 from arcreel_market_core.validation_messages import code_translator
 
 
+def test_upload_encoding_requires_valid_upload_request():
+    definition = custom_endpoint_definition()
+    definition["inputs"]["first_frame"]["encoding"] = "upload"
+    assert ("upload", "missing_field") in _codes(validate_definition(definition))
+    definition["upload"] = {
+        "method": "POST",
+        "url": "{{ base_url }}/v1/files",
+        "field": "file",
+        "extract": {"url": ["$.url"]},
+    }
+    assert validate_definition(definition).valid
+    definition["upload"]["url"] += "/{{ inputs.first_frame }}"
+    assert ("upload.url", "input_out_of_scope") in _codes(validate_definition(definition))
+
+
 @pytest.mark.parametrize(("required", "declared_t2v"), [(True, False), (False, True)])
 def test_text_to_video_declaration_matching_required_inputs_is_accepted(required: bool, declared_t2v: bool):
     definition = custom_endpoint_definition()

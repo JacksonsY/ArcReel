@@ -22,7 +22,7 @@ from lib.backends.text_backends.instructor_support import (
     instructor_fallback_async,
     instructor_fallback_sync,
 )
-from tests.fakes import instructor_api_call_exhausted
+from tests.fakes import ChatCompletionStreamFake, instructor_api_call_exhausted
 
 
 class SampleModel(BaseModel):
@@ -179,10 +179,12 @@ def _recorded_instructor(
     patched = SimpleNamespace(chat=SimpleNamespace(completions=_Completions()), on=lambda hook_name, handler: None)
 
     def _from_openai(client: Any, **kwargs: Any) -> Any:
+        kwargs.pop("create", None)
         patched_with.append({"client": client, **kwargs})
         return patched
 
-    with patch("lib.backends.text_backends.instructor_support.instructor.from_openai", _from_openai):
+    target = "AsyncInstructor" if is_async else "from_openai"
+    with patch(f"lib.backends.text_backends.instructor_support.instructor.{target}", _from_openai):
         yield patched_with, calls
 
 
@@ -341,7 +343,7 @@ class TestGenerateStructuredViaInstructorAsync:
 
         with patch("lib.backends.text_backends.instructor_support.instructor") as mock_instructor:
             mock_patched = MagicMock()
-            mock_instructor.from_openai.return_value = mock_patched
+            mock_instructor.AsyncInstructor.return_value = mock_patched
             mock_patched.chat.completions.create_with_completion = AsyncMock(return_value=(sample, mock_completion))
 
             _json_text, input_tokens, output_tokens = await generate_structured_via_instructor_async(
@@ -363,7 +365,7 @@ class TestGenerateStructuredViaInstructorAsync:
         """异步版 IncompleteOutputException 同样归一为 TextOutputTruncatedError。"""
         with patch("lib.backends.text_backends.instructor_support.instructor") as mock_instructor:
             mock_patched = MagicMock()
-            mock_instructor.from_openai.return_value = mock_patched
+            mock_instructor.AsyncInstructor.return_value = mock_patched
             mock_patched.chat.completions.create_with_completion = AsyncMock(side_effect=IncompleteOutputException())
 
             with pytest.raises(TextOutputTruncatedError) as exc_info:
@@ -1116,8 +1118,8 @@ class TestStructuredModeChainThroughInstructor:
         client = AsyncOpenAI(api_key="sk-test", base_url="https://proxy.invalid/v1")
         client.chat.completions.create = AsyncMock(
             side_effect=[
-                self._content_only_completion(prompt_tokens=11, completion_tokens=7),
-                self._content_only_completion(prompt_tokens=13, completion_tokens=5),
+                ChatCompletionStreamFake(self._content_only_completion(prompt_tokens=11, completion_tokens=7)),
+                ChatCompletionStreamFake(self._content_only_completion(prompt_tokens=13, completion_tokens=5)),
             ]
         )
 
@@ -1167,7 +1169,7 @@ class TestInstructorFallbackAsync:
             choices=[SimpleNamespace(message=SimpleNamespace(content='{"k": "v"}'))],
             usage=SimpleNamespace(prompt_tokens=25, completion_tokens=12),
         )
-        mock_client.chat.completions.create.return_value = mock_response
+        mock_client.chat.completions.create.return_value = ChatCompletionStreamFake(mock_response)
 
         result = await instructor_fallback_async(
             client=mock_client,
@@ -1226,7 +1228,7 @@ class TestInstructorFallbackAsync:
             choices=[SimpleNamespace(message=SimpleNamespace(content='{"k": "v"}'))],
             usage=None,
         )
-        mock_client.chat.completions.create.return_value = mock_response
+        mock_client.chat.completions.create.return_value = ChatCompletionStreamFake(mock_response)
 
         await instructor_fallback_async(
             client=mock_client,
@@ -1248,7 +1250,7 @@ class TestInstructorFallbackAsync:
             choices=[SimpleNamespace(message=SimpleNamespace(content='{"k": "v"}'))],
             usage=None,
         )
-        mock_client.chat.completions.create.return_value = mock_response
+        mock_client.chat.completions.create.return_value = ChatCompletionStreamFake(mock_response)
 
         await instructor_fallback_async(
             client=mock_client,
@@ -1267,9 +1269,11 @@ class TestInstructorFallbackAsync:
     async def test_dict_schema_strips_leading_think_block_async(self):
         """异步 json_object 路径同样剥掉 content 开头的思考块。"""
         mock_client = AsyncMock()
-        mock_client.chat.completions.create.return_value = SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content='<think>想一想。</think>\n{"k": "v"}'))],
-            usage=None,
+        mock_client.chat.completions.create.return_value = ChatCompletionStreamFake(
+            SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content='<think>想一想。</think>\n{"k": "v"}'))],
+                usage=None,
+            )
         )
 
         result = await instructor_fallback_async(
@@ -1291,7 +1295,7 @@ class TestInstructorFallbackAsync:
             ],
             usage=SimpleNamespace(prompt_tokens=10, completion_tokens=999),
         )
-        mock_client.chat.completions.create.return_value = mock_response
+        mock_client.chat.completions.create.return_value = ChatCompletionStreamFake(mock_response)
 
         with pytest.raises(TextOutputTruncatedError) as exc_info:
             await instructor_fallback_async(

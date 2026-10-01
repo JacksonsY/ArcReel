@@ -25,6 +25,7 @@ MESSAGES = {
     "operation_draft_finish": "这是可编辑草稿；请保留已有修改，再调用 {tool} 校验晋升。",
     "operation_draft_action": "草稿：{path}。{action}",
     "operation_episode_source_location": "集原文位置：{path}；由分集规划切出的集经 plan_episodes 生成。",
+    "text_stream_incomplete": "模型响应流中断或缺少结束标记，结果不完整；已停止自动重试，请检查供应商记录后再重试。",
     "project_migration_failed": "项目 '{name}' 的数据升级未完成，暂时无法生成内容。原因：{reason}。请在 Agent 对话中修复后重试升级",
     "project_not_found": "项目 '{name}' 不存在或未初始化",
     "resource_not_found": "请求的资源不存在",

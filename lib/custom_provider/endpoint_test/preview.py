@@ -106,6 +106,7 @@ def preview_request(
         inputs,
         definition.get("defaults"),
         media_type=media_type,
+        input_declarations=definition.get("inputs"),
     )
     return RequestPreview(
         submit=_preview_section(definition, "submit", context),
@@ -237,6 +238,8 @@ def _placeholder_summary(encoding: str, source: str) -> str:
 
 
 def _encoding_label(encoding: str, mime_type: str) -> str:
+    if encoding == "upload":
+        return "uploaded HTTP(S) URL"
     return f"data:{mime_type};base64" if encoding == "data_uri" else "base64"
 
 

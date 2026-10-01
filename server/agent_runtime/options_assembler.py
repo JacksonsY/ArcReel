@@ -17,6 +17,7 @@ import os
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from lib.agent.agent_memory_index import INDEX_FILENAME, truncate_memory_index
 from lib.agent.agent_memory_paths import is_valid_memory_user_id, project_memory_dir
@@ -67,6 +68,17 @@ async def load_provider_env_overrides() -> dict[str, str]:
         anthropic_env = await build_anthropic_env_dict(session)
 
     result = dict(anthropic_env)
+    base_url = result.get("ANTHROPIC_BASE_URL", "").strip()
+    host = urlsplit(base_url).hostname if base_url else None
+    if host and host.rstrip(".").casefold() != "api.anthropic.com":
+        # Claude Code aborts silent third-party streams after five minutes by default.
+        stream_idle_timeout = os.environ.get("CLAUDE_STREAM_IDLE_TIMEOUT_MS") or "600000"
+        result["API_FORCE_IDLE_TIMEOUT"] = os.environ.get("API_FORCE_IDLE_TIMEOUT") or "0"
+        result["CLAUDE_STREAM_IDLE_TIMEOUT_MS"] = stream_idle_timeout
+        result["CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS"] = (
+            os.environ.get("CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS") or stream_idle_timeout
+        )
+        result["API_TIMEOUT_MS"] = os.environ.get("API_TIMEOUT_MS") or "600000"
     for key in OTHER_PROVIDER_ENV_KEYS:
         result[key] = ""
     return result

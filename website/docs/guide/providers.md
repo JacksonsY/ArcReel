@@ -363,8 +363,8 @@ ArcReel 可以接入 OpenAI 兼容或 Google 兼容服务。典型用途：
 
 ### 10.2 用 Agent 适配自定义调用端点 {#custom-endpoint-agent}
 
-视频或图片供应商采用 JSON 提交任务、再用任务 ID 轮询 JSON 结果时，可以把适配交给 Claude Code 等
-外部 Agent。签名鉴权、发往供应商的 multipart 请求或按素材切换路由不在声明式定义首期范围内。
+视频或图片供应商采用 JSON 提交任务、再用任务 ID 轮询 JSON 结果时，可以把适配交给 Claude Code 等外部
+Agent。需要公网参考素材的供应商，可在定义 JSON 中配置 `upload`（POST 地址、multipart 文件字段名、响应 URL 的提取路径），并将素材的 `encoding` 设为 `upload`。ArcReel 会在提交前上传素材，再把取得的 URL 写入生成请求；上传失败时不会提交生成，续跑已有任务也不会重复上传。`generation_type` 可通过枚举映射转换为供应商的文生、首帧图生或参考生模式值。此能力需要支持声明式格式 1.2 的运行时。签名鉴权、直接以 multipart 提交生成或按素材切换路由仍不在范围内。
 
 安装公开 skill：
 

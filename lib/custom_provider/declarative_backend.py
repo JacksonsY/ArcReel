@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import mimetypes
 import re
@@ -17,7 +18,7 @@ from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
 
@@ -134,7 +135,7 @@ def _headers_with_auth_masked(headers: Mapping[str, str], auth: Mapping[str, Any
 
 
 #: 定义里会渲染出 URL 的三节。
-REQUEST_SECTIONS = ("submit", "poll", "result")
+REQUEST_SECTIONS = ("upload", "submit", "poll", "result")
 #: 直接以 base_url + 显式版本段起头的 URL 模板。
 _VERSIONED_BASE_URL = re.compile(r"^\s*\{\{\s*base_url\s*\}\}/v\d")
 
@@ -381,6 +382,7 @@ class DeclarativeJobEngine[StateT: JobState]:
         *,
         submitted_base_url: str | None = None,
         require_declared_inputs: bool = False,
+        encoded_inputs: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
         """构造模板上下文：凭证、域名与模型之外的变量和素材由组装方按媒体类型给出。
 
@@ -392,11 +394,13 @@ class DeclarativeJobEngine[StateT: JobState]:
         try:
             # 素材读盘也在守卫内：文件在任务准备与执行之间被删掉时抛的是 OSError，落在守卫外
             # 就会绕过稳定错误码，让 worker 存下一段没有译文的裸文本。
-            loaded = {
-                name: self._assets(paths) if isinstance(paths, list) else self._asset(paths)
-                for name, paths in assets.items()
-            }
-            encoded = encode_inputs(declarations, loaded)
+            if encoded_inputs is None:
+                loaded = {
+                    name: self._assets(paths) if isinstance(paths, list) else self._asset(paths)
+                    for name, paths in assets.items()
+                }
+                encoded_inputs = encode_inputs(declarations, loaded)
+            encoded = encoded_inputs
             # 声明为必需的素材缺席时就地失败：模板会把整串占位符的键直接删掉，请求照样发得出去，
             # 于是供应商收到一个残缺请求、照常建任务照常计费。
             missing = (
@@ -420,11 +424,81 @@ class DeclarativeJobEngine[StateT: JobState]:
                 encoded,
                 self._definition.get("defaults"),
                 media_type=definition_media_type(self._definition),
+                input_declarations=declarations,
             )
         except TemplateRenderError as exc:
             raise DeclarativeRuntimeError("declarative_template_render_failed", detail=exc.message) from exc
         except OSError as exc:
             raise DeclarativeRuntimeError("declarative_template_render_failed", detail=str(exc)) from exc
+
+    async def upload_inputs(
+        self,
+        client: httpx.AsyncClient,
+        variables: Mapping[str, object],
+        assets: Mapping[str, AssetPaths],
+        call: JobCall,
+    ) -> dict[str, object]:
+        """每次提交前换取素材 URL；仅在本次请求内复用，不缓存会过期的地址。"""
+        declarations = self._definition.get("inputs") or {}
+        encoded: dict[str, object] = {}
+        context = self.request_context(variables, {}, encoded_inputs={})
+        section = self._definition["upload"]
+        rendered = self._render(section, context)
+        uploaded: dict[Path, str] = {}
+        for name, declaration in declarations.items():
+            source = declaration["source"]
+            raw_paths = assets.get(source)
+            is_list = source in {"reference_images", "reference_audio_files"}
+            paths = raw_paths if isinstance(raw_paths, list) else ([raw_paths] if raw_paths is not None else [])
+            if not paths and declaration.get("required"):
+                raise DeclarativeRuntimeError(
+                    "declarative_template_render_failed", detail=f"required input is missing: {name}"
+                )
+            loaded_assets: list[AssetData] = []
+            for path in paths:
+                asset = await asyncio.to_thread(self._asset, path)
+                assert asset is not None
+                loaded_assets.append(asset)
+            if declaration["encoding"] != "upload":
+                encoded.update(
+                    encode_inputs(
+                        {name: declaration},
+                        {source: loaded_assets if is_list else (loaded_assets[0] if loaded_assets else None)},
+                    )
+                )
+                continue
+            urls = []
+            for path, asset in zip(paths, loaded_assets, strict=True):
+                if path not in uploaded:
+                    response = await request_with_scoped_credentials(
+                        client,
+                        "POST",
+                        rendered.url,
+                        headers={
+                            key: value for key, value in rendered.headers.items() if key.lower() != "content-type"
+                        },
+                        json=None,
+                        auth_query=rendered.auth_query,
+                        files={section["field"]: (path.name, asset.content, asset.mime_type)},
+                    )
+                    try:
+                        response.raise_for_status()
+                    except httpx.HTTPStatusError as exc:
+                        await self._record_response(response, call, "submit")
+                        raise redacted_status_error(exc) from None
+                    body = await self._response_body(response, call, "submit")
+                    url = extract_text(section["extract"]["url"], body)
+                    parsed = urlsplit(url or "")
+                    if not url or parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                        raise DeclarativeRuntimeError(
+                            "declarative_response_extract_failed",
+                            detail=extract_text(section["extract"].get("error"), body)
+                            or "upload response did not contain an HTTP(S) URL",
+                        )
+                    uploaded[path] = url
+                urls.append(uploaded[path])
+            encoded[name] = (urls or None) if is_list else (urls[0] if urls else None)
+        return encoded
 
     @staticmethod
     def _asset(path: Path | None) -> AssetData | None:
@@ -759,8 +833,15 @@ class DeclarativeVideoBackend(ProviderJobIdPersistenceMixin):
         return video_capabilities_from_definition(self._definition)
 
     async def generate(self, request: VideoGenerationRequest) -> VideoGenerationResult:
-        context = self._request_context(request, require_declared_inputs=True)
         async with artifact_http_client(timeout=_HTTP_TIMEOUT_SECONDS, follow_redirects=True) as client:
+            encoded = (
+                await self._engine.upload_inputs(
+                    client, _video_variables(request), _video_assets(request), _job_call(request)
+                )
+                if "upload" in self._definition
+                else None
+            )
+            context = self._request_context(request, require_declared_inputs=True, encoded_inputs=encoded)
             job_id = await self._engine.submit(client, context, _job_call(request))
             # 落提交域名供续跑回放：用户在途改了供应商 base_url 时，按新域名轮旧 job 会查无，
             # 把一笔已付费的任务误判成过期丢掉。
@@ -770,31 +851,23 @@ class DeclarativeVideoBackend(ProviderJobIdPersistenceMixin):
             return await self._poll_download(client, job_id, request, context=context, is_resume=False)
 
     async def resume_video(self, job_id: str, request: VideoGenerationRequest) -> VideoGenerationResult:
-        context = self._request_context(request)
+        context = self._request_context(request, encoded_inputs={})
         async with artifact_http_client(timeout=_HTTP_TIMEOUT_SECONDS, follow_redirects=True) as client:
             return await self._poll_download(client, job_id, request, context=context, is_resume=True)
 
     def _request_context(
-        self, request: VideoGenerationRequest, *, require_declared_inputs: bool = False
+        self,
+        request: VideoGenerationRequest,
+        *,
+        require_declared_inputs: bool = False,
+        encoded_inputs: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
         return self._engine.request_context(
-            {
-                "prompt": request.prompt,
-                "duration": request.duration_seconds,
-                "duration_seconds": request.duration_seconds,
-                "aspect_ratio": request.aspect_ratio,
-                "resolution": request.resolution,
-                "generate_audio": request.generate_audio,
-                "seed": request.seed,
-            },
-            {
-                "start_image": request.start_image,
-                "end_image": request.end_image,
-                "reference_images": request.reference_images,
-                "reference_audio_files": request.reference_audio_files,
-            },
+            _video_variables(request),
+            _video_assets(request),
             submitted_base_url=request.submitted_base_url,
             require_declared_inputs=require_declared_inputs,
+            encoded_inputs=encoded_inputs,
         )
 
     async def _poll_download(
@@ -845,3 +918,24 @@ def _job_call(request: VideoGenerationRequest) -> JobCall:
         on_provider_response=request.on_provider_response,
         label=request.task_id,
     )
+
+
+def _video_variables(request: VideoGenerationRequest) -> dict[str, object]:
+    return {
+        "prompt": request.prompt,
+        "duration": request.duration_seconds,
+        "duration_seconds": request.duration_seconds,
+        "aspect_ratio": request.aspect_ratio,
+        "resolution": request.resolution,
+        "generate_audio": request.generate_audio,
+        "seed": request.seed,
+    }
+
+
+def _video_assets(request: VideoGenerationRequest) -> dict[str, AssetPaths]:
+    return {
+        "start_image": request.start_image,
+        "end_image": request.end_image,
+        "reference_images": request.reference_images,
+        "reference_audio_files": request.reference_audio_files,
+    }

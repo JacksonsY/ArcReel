@@ -2570,6 +2570,7 @@ export default {
   'ce_input_source_reference_audio_files': 'Âm thanh tham chiếu',
   'ce_input_encoding_data_uri': 'base64 data URI',
   'ce_input_encoding_base64': 'base64 thuần',
+  'ce_input_encoding_upload': 'Tải lên để lấy URL (cấu hình upload trong JSON)',
   'ce_section_submit': 'Gửi tác vụ tạo video',
   'ce_section_submit_desc': 'Yêu cầu khởi tạo một lần tạo video, và vị trí đọc ID tác vụ từ phản hồi của nó.',
   'ce_request_method': 'Phương thức',

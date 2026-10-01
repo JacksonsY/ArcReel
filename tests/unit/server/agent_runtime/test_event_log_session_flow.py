@@ -139,6 +139,57 @@ class _QueryFailureClient(FakeSDKClient):
 
 
 class TestNewSessionEventLogFlow:
+    @pytest.mark.parametrize("is_error", [False, True])
+    async def test_background_result_preserves_pending_user_echo_and_rewrite_identity(
+        self, manager: SessionManager, is_error: bool
+    ):
+        background_result = {
+            "type": "result",
+            "subtype": "success",
+            "is_error": is_error,
+            "session_id": SDK_ID,
+            "origin": {"kind": "task-notification"},
+        }
+        client = FakeSDKClient(messages=[background_result])
+        background_recorded = asyncio.Event()
+
+        async def record_usage(_managed, result, _status):
+            if result.get("origin"):
+                background_recorded.set()
+
+        await manager.meta_store.create("demo", SDK_ID)
+        meta = await manager.meta_store.get(SDK_ID)
+        broadcasts: list[dict] = []
+        with (
+            patch.object(manager, "_build_options", new=AsyncMock(return_value=SimpleNamespace(env=None))),
+            patch.object(manager, "_record_assistant_usage", new=AsyncMock(side_effect=record_usage)) as usage,
+            patch("server.agent_runtime.session_manager.ClaudeSDKClient", lambda options: client),
+        ):
+            managed = await manager.get_or_connect(SDK_ID, meta=meta)
+            assert managed.entry_pipeline is not None
+            try:
+                with patch.object(managed.entry_pipeline, "_broadcast", side_effect=broadcasts.append):
+                    entry = await manager.send_message(
+                        SDK_ID, "继续", user_entry=build_user_entry([{"type": "text", "text": "继续"}])
+                    )
+                    await asyncio.wait_for(background_recorded.wait(), timeout=1)
+                    assert managed.status == "running"
+                    assert managed.pending_user_echoes
+                    assert not any(m["type"] == "log_turn_complete" for m in broadcasts)
+
+                    client.push_message({"type": "user", "content": "继续", "uuid": "sdk-next", "session_id": SDK_ID})
+                    client.push_message({"type": "result", "subtype": "success", "session_id": SDK_ID})
+                    await _wait_for_status(manager, SDK_ID, "completed")
+
+                assert entry is not None
+                assert await manager.event_log_store.find_user_message_link(SDK_ID, entry["uuid"]) == "sdk-next"
+                assert not managed.pending_user_echoes
+                assert manager.unclaimed_user_echoes == 0
+                assert usage.await_count == 2
+                assert sum(m["type"] == "log_turn_complete" for m in broadcasts) == 1
+            finally:
+                await manager.close_session(SDK_ID)
+
     async def test_receive_crash_before_init_is_reported_as_structured_startup_failure(self, manager: SessionManager):
         captured_stderr: list = []
 

@@ -1485,6 +1485,7 @@ async def patch_draft(
             accepts_formal_revision="accept_formal_revision" in patch.model_fields_set,
             source=patch.source,
             updates_source="source" in patch.model_fields_set,
+            edits=patch.edits,
         )
     )
 

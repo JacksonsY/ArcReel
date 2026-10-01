@@ -318,7 +318,9 @@ class TestValidate:
         assert body["hints"] == definition["meta"]["hints"]
 
     def test_reports_schema_version_level(self, endpoints_client: TestClient):
-        body = endpoints_client.post("/api/v1/custom-endpoints/validate", json=custom_endpoint_definition()).json()
+        body = endpoints_client.post(
+            "/api/v1/custom-endpoints/validate", json=custom_endpoint_definition(schema_version=CURRENT_SCHEMA_VERSION)
+        ).json()
 
         assert body["schema_version"] == {
             "file": CURRENT_SCHEMA_VERSION,

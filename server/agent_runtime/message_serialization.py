@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from server.agent_runtime.message_utils import extract_plain_user_content
+from server.agent_runtime.message_utils import extract_plain_user_content, is_injected_message
 from server.agent_runtime.models import SessionStatus
 
 # Sentinel used in pending_user_echoes for image-only messages (no text).
@@ -133,7 +133,7 @@ def match_user_echo(
     Returns the matched record (popped from the queue) so the caller can carry
     its entry identity onward, or None when the message is not a replay copy.
     """
-    if not pending_user_echoes:
+    if not pending_user_echoes or is_injected_message(message):
         return None
     incoming = extract_plain_user_content(message)
     expected = pending_user_echoes[0].dedup_key.strip()

@@ -13,7 +13,7 @@ export type EndpointInputSource =
   | "reference_audio_files";
 
 /** 素材发送到供应商时的编码形态。 */
-export type EndpointInputEncoding = "data_uri" | "base64";
+export type EndpointInputEncoding = "data_uri" | "base64" | "upload";
 
 /** 标准状态四档，与后端 ProviderJobStatus 同名。 */
 export type EndpointStandardStatus = "queued" | "running" | "succeeded" | "failed";
@@ -127,6 +127,13 @@ export interface EndpointDefinition {
   meta: EndpointMeta;
   auth: EndpointAuth;
   inputs?: Record<string, EndpointInputSpec>;
+  upload?: {
+    method: "POST";
+    url: string;
+    field: string;
+    headers?: Record<string, string>;
+    extract: { url: EndpointExtractSpec; error?: EndpointExtractSpec };
+  };
   enum_maps?: Record<string, Record<string, string | number | boolean>>;
   defaults?: Record<string, string | number | boolean>;
   submit: EndpointSubmitSpec;

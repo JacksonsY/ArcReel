@@ -10,7 +10,20 @@ import pytest
 
 from lib.backends.text_backends.ark import ArkTextBackend
 from lib.backends.text_backends.base import TextCapability, TextGenerationRequest, TextGenerationResult
-from tests.fakes import bounded_poll_clock, captured_ark_clients, patched_instructor_from_openai
+from tests.fakes import bounded_poll_clock, captured_ark_clients
+
+
+@contextmanager
+def _patched_instructor_from_openai(patched: Any = None, **patch_kwargs: Any) -> Generator[Any]:
+    """在 SDK 边界替换 ``instructor.from_openai``，yield 该替身，供测试断言传给 ``from_openai`` 的参数。
+
+    *patched* 是 ``from_openai`` 返回的 instructor 客户端；省略时返回默认替身。
+    其余关键字参数（``return_value`` / ``side_effect``）原样交给 ``patch``。
+    """
+    with patch("instructor.from_openai", **patch_kwargs) as from_openai:
+        if patched is not None:
+            from_openai.return_value = patched
+        yield from_openai
 
 
 @contextmanager
@@ -50,7 +63,7 @@ def _recorded_instructor_wire(result: tuple[Any, Any]) -> Generator[list[dict[st
             return result
 
     client = SimpleNamespace(chat=SimpleNamespace(completions=_Completions()), on=lambda hook_name, handler: None)
-    with patched_instructor_from_openai(client):
+    with _patched_instructor_from_openai(client):
         yield calls
 
 
@@ -420,7 +433,7 @@ class TestSuccessPathReverify:
         mock_patched = MagicMock()
         mock_patched.chat.completions.create_with_completion = MagicMock(return_value=(instructor_result, completion))
 
-        with patched_instructor_from_openai(mock_patched):
+        with _patched_instructor_from_openai(mock_patched):
             result = await backend.generate(TextGenerationRequest(prompt="x", response_schema=Person))
 
         assert result.text == instructor_result.model_dump_json()
@@ -448,7 +461,7 @@ class TestSuccessPathReverify:
         mock_patched = MagicMock()
         mock_patched.chat.completions.create_with_completion = MagicMock(return_value=(instructor_result, completion))
 
-        with patched_instructor_from_openai(mock_patched):
+        with _patched_instructor_from_openai(mock_patched):
             result = await backend.generate(TextGenerationRequest(prompt="x", response_schema=Person))
 
         assert result.text == instructor_result.model_dump_json()
@@ -476,7 +489,7 @@ class TestSuccessPathReverify:
         mock_patched = MagicMock()
         mock_patched.chat.completions.create_with_completion = MagicMock(return_value=(instructor_result, completion))
 
-        with patched_instructor_from_openai(mock_patched):
+        with _patched_instructor_from_openai(mock_patched):
             result = await backend.generate(TextGenerationRequest(prompt="x", response_schema=Person))
 
         assert result.text == instructor_result.model_dump_json()
@@ -500,7 +513,7 @@ class TestSuccessPathReverify:
         )
         backend._test_client.chat.completions.create = MagicMock(return_value=mock_resp)
 
-        with patched_instructor_from_openai() as mock_from_openai:
+        with _patched_instructor_from_openai() as mock_from_openai:
             result = await backend.generate(TextGenerationRequest(prompt="x", response_schema=Person))
 
         assert result.text == valid
@@ -574,7 +587,7 @@ class TestSuccessPathReverify:
         )
         backend._test_client.chat.completions.create = MagicMock(return_value=mock_resp)
 
-        with patched_instructor_from_openai() as mock_from_openai:
+        with _patched_instructor_from_openai() as mock_from_openai:
             result = await backend.generate(TextGenerationRequest(prompt="x", response_schema=Person))
 
         assert result.text == coercible
@@ -598,7 +611,7 @@ class TestSuccessPathReverify:
         mock_patched = MagicMock()
         mock_patched.chat.completions.create_with_completion = MagicMock(return_value=(instructor_result, completion))
 
-        with patched_instructor_from_openai(mock_patched):
+        with _patched_instructor_from_openai(mock_patched):
             result = await backend.generate(TextGenerationRequest(prompt="x", response_schema=Person))
 
         # 解析异常落入 except → 降级路径，返回带校验结果（不并入原生 token：原生未成功解析）

@@ -93,6 +93,43 @@ async def test_load_provider_env_overrides_injects_anthropic_and_empties() -> No
 
 
 @pytest.mark.asyncio
+async def test_custom_anthropic_gateway_gets_longer_stream_idle_limits(monkeypatch) -> None:
+    monkeypatch.delenv("API_FORCE_IDLE_TIMEOUT", raising=False)
+    monkeypatch.delenv("CLAUDE_STREAM_IDLE_TIMEOUT_MS", raising=False)
+
+    async def fake_build(_session):
+        return {
+            "ANTHROPIC_API_KEY": "sk-from-db",
+            "ANTHROPIC_BASE_URL": "https://gateway.example.com",
+        }
+
+    with patch("lib.config.service.build_anthropic_env_dict", side_effect=fake_build):
+        env = await load_provider_env_overrides()
+
+    assert env["API_FORCE_IDLE_TIMEOUT"] == "0"
+    assert env["CLAUDE_STREAM_IDLE_TIMEOUT_MS"] == "600000"
+    assert env["CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS"] == "600000"
+    assert env["API_TIMEOUT_MS"] == "600000"
+
+
+@pytest.mark.asyncio
+async def test_first_party_anthropic_endpoint_keeps_default_stream_limits() -> None:
+    async def fake_build(_session):
+        return {
+            "ANTHROPIC_API_KEY": "sk-from-db",
+            "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+        }
+
+    with patch("lib.config.service.build_anthropic_env_dict", side_effect=fake_build):
+        env = await load_provider_env_overrides()
+
+    assert "API_FORCE_IDLE_TIMEOUT" not in env
+    assert "CLAUDE_STREAM_IDLE_TIMEOUT_MS" not in env
+    assert "CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS" not in env
+    assert "API_TIMEOUT_MS" not in env
+
+
+@pytest.mark.asyncio
 async def test_build_provider_env_overrides_uses_injected_loader(tmp_path: Path) -> None:
     """注入 provider_env_loader 时，build_provider_env_overrides 走注入源而非 DB。"""
     sentinel = {"ANTHROPIC_API_KEY": "injected"}

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from enum import Enum
+from functools import partial
 from json import JSONDecodeError
 from typing import TYPE_CHECKING, Any
 
@@ -32,6 +33,7 @@ from lib.backends.text_backends.base import (
     strip_leading_think_block,
     truncate_for_log,
 )
+from lib.backends.text_backends.openai_stream import create_streamed_completion
 
 if TYPE_CHECKING:
     from openai import AsyncOpenAI
@@ -338,7 +340,12 @@ async def generate_structured_via_instructor_async(
     ``IncompleteOutputException``（输出被 max_tokens 截断）归一为 :class:`TextOutputTruncatedError`，
     与原生结构化通道的截断行为同口径（见 docs/adr/0044）。
     """
-    patched = instructor.from_openai(client, mode=mode)
+    # Instructor 仍校验完整 completion；其每次校验重试在传输层均采用流式。
+    patched = instructor.AsyncInstructor(
+        client=client,
+        create=instructor.patch(create=partial(create_streamed_completion, client), mode=mode),
+        mode=mode,
+    )
     patched.on("completion:response", _strip_think_block_in_response)
     extra: dict = {token_param: max_tokens} if max_tokens is not None else {}
     try:
@@ -562,12 +569,12 @@ async def instructor_fallback_async(
     }
     if max_tokens is not None:
         create_kwargs[token_param] = max_tokens
-    response = await client.chat.completions.create(**create_kwargs)
+    response = await create_streamed_completion(client, **create_kwargs)
     usage = getattr(response, "usage", None)
     choice = response.choices[0]
     content = choice.message.content or ""
     # 与原生路径同口径：思考模型内嵌在 content 开头的思考块不进结果。
-    text = strip_leading_think_block(content) if isinstance(content, str) else str(content)
+    text = strip_leading_think_block(content)
     output_tokens = getattr(usage, "completion_tokens", None) if usage else None
     # dict schema 仍是结构化输出诉求（response_schema 非空，只是无 Pydantic 模型可走原生
     # Instructor 通道），截断同样升级为硬错误。

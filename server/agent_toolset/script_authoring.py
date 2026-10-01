@@ -106,7 +106,8 @@ OPEN_DRAFT = ToolDeclaration(
 PATCH_DRAFT = ToolDeclaration(
     name="patch_draft",
     description=(
-        "按 canonical revision 原子替换草稿正文；revision 冲突时拒绝且不写入。"
+        "按 canonical revision 原子修改草稿正文；局部修复优先用 edits 仅提交改动字段，避免回传整份长草稿。"
+        "整份改写才用 content，与 edits 二选一；revision 冲突或任一路径不存在时整批拒绝且不写入。"
         "给出 accept_formal_revision 即接受正式文档的并发修改，给出 source 即更新重判范围，二者显式传 null 同样生效。"
     ),
     request_model=PatchDraftRequest,

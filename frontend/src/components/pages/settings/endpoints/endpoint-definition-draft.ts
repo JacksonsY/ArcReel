@@ -66,7 +66,7 @@ export const MEDIA_TYPE_FORM_PROFILES: Record<EndpointMediaType, MediaTypeFormPr
   },
 };
 
-export const INPUT_ENCODINGS: EndpointInputEncoding[] = ["data_uri", "base64"];
+export const INPUT_ENCODINGS: EndpointInputEncoding[] = ["data_uri", "base64", "upload"];
 
 export const STANDARD_STATUSES: EndpointStandardStatus[] = [
   "queued",

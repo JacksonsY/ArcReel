@@ -27,6 +27,7 @@ from server.agent_runtime.event_log import (
     is_interrupt_entry,
 )
 from server.agent_runtime.failure_observation import failure_observation_json
+from server.agent_runtime.message_utils import is_injected_message
 from server.agent_runtime.turn_schema import normalize_block
 
 logger = logging.getLogger(__name__)
@@ -279,6 +280,8 @@ class SessionEntryPipeline:
             await self._append_normalized(session_id, entries)
             # 轮次终结：未被权威条目替换的 draft（中断/错误）随内存丢弃。
             self.draft.clear()
+            if is_injected_message(msg_dict):
+                return
             # 中断的结果是时间线事件：SDK 回显缺席时由 result 兜底定型，
             # 尾检去重保证与已入日志的回显只留一条。须先于 log_turn_complete
             # 广播，否则 entry 流在终态处断开、live 订阅者丢失中断条目。
