@@ -30,14 +30,12 @@ def test_public_skill_selectors_are_independently_installable() -> None:
         assert _frontmatter(skill_file)["name"] == selector
 
 
-def test_custom_endpoint_skill_is_mirrored_from_the_runtime_profile() -> None:
+def test_custom_endpoint_skill_is_available_in_the_runtime_profile() -> None:
     skill_dir = REPO_ROOT / "agent_runtime_profile" / ".claude" / "skills" / EMBEDDED_PUBLIC_SKILL
-    workflow = (REPO_ROOT / ".github" / "workflows" / "sync-public-skills.yml").read_text(encoding="utf-8")
 
     assert _frontmatter(skill_dir / "SKILL.md")["name"] == EMBEDDED_PUBLIC_SKILL
     assert (skill_dir / "scripts" / "custom_endpoint.py").is_file()
     assert (skill_dir / "references" / "definition-format.md").is_file()
-    assert "source/agent_runtime_profile/.claude/skills/adapt-custom-endpoint" in workflow
 
 
 def test_setup_skill_is_model_invocable_for_agent_onboarding() -> None:

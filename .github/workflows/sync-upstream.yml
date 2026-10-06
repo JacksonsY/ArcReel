@@ -1,0 +1,79 @@
+name: Sync ArcReel upstream
+
+on:
+  schedule:
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      changed: ${{ steps.merge.outputs.changed }}
+      sha: ${{ steps.merge.outputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch official main
+        run: git fetch https://github.com/ArcReel/ArcReel.git main:refs/remotes/upstream/main
+
+      - name: Merge upstream and keep fork Actions
+        id: merge
+        run: |
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          merge_status=0
+          git merge --no-commit --no-ff upstream/main || merge_status=$?
+          if (( merge_status > 1 )); then
+            exit "$merge_status"
+          fi
+          # 本仓库独立维护 GitHub 配置，官方工作流不会随同步重新启用。
+          git rm -r -f -- .github
+          git restore --source=HEAD --staged --worktree -- .github
+          if [[ -n "$(git diff --name-only --diff-filter=U)" ]]; then
+            echo "::error::Upstream conflicts require manual resolution; main was not changed."
+            git diff --name-only --diff-filter=U
+            exit 1
+          fi
+          git commit -m "chore: sync ArcReel upstream main"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Push merged main
+        if: steps.merge.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh auth setup-git
+          git push origin HEAD:main
+
+  docker:
+    needs: sync
+    if: needs.sync.outputs.changed == 'true'
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+    uses: ./.github/workflows/docker-edge.yml
+    with:
+      ref: ${{ needs.sync.outputs.sha }}

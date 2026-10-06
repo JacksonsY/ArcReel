@@ -256,6 +256,8 @@ def check_dependabot_groups(root: Path, out: list[Violation]) -> None:
 
 
 def check_tool_versions(root: Path, out: list[Violation]) -> None:
+    if not (root / CI_WORKFLOW).exists():
+        return
     pre_commit = yaml.safe_load((root / PRE_COMMIT_CONFIG).read_text(encoding="utf-8"))
     revs = {
         str(repo.get("repo", "")).rstrip("/").rsplit("/", 1)[-1]: str(repo.get("rev", "")).removeprefix("v")

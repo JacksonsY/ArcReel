@@ -209,6 +209,12 @@ def test_unrecognised_tool_declaration_is_reported_instead_of_passing(repo: Path
     assert [v.rule for v in audit(repo)] == ["TOOL-VERSION", "TOOL-VERSION"]
 
 
+def test_tool_versions_only_apply_when_ci_checks_are_present(repo: Path) -> None:
+    (repo / ".github/workflows/test.yml").unlink()
+
+    assert audit(repo) == []
+
+
 def _suppression_lines(root: Path) -> list[tuple[str, int]]:
     return [(v.path.as_posix(), v.line) for v in audit(root) if v.rule == "SUPPRESSION-REASON"]
 
