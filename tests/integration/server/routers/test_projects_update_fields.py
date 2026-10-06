@@ -3,6 +3,7 @@
 import pytest
 
 from lib.project.project_manager import ProjectManager
+from lib.prompts.prompt_builders import build_scene_prompt
 from tests.integration.server.routers.projects_router_support import (
     _FakePM,
     build_projects_client,
@@ -10,6 +11,30 @@ from tests.integration.server.routers.projects_router_support import (
 
 
 class TestProjectsRouter:
+    def test_custom_text_style_survives_template_clear_and_reaches_generation(self, tmp_path, monkeypatch):
+        manager = ProjectManager(tmp_path)
+        manager.create_project("ready")
+        manager.create_project_metadata("ready", style="Previous style", style_template_id="live_premium_drama")
+        manager.update_project(
+            "ready", lambda project: project.update(style_image="reference.png", style_description="Old image style")
+        )
+        client = build_projects_client(monkeypatch, manager)
+        with client:
+            response = client.patch(
+                "/api/v1/projects/ready",
+                json={"style": "低饱和暖色调。\n柔和侧光。", "style_template_id": None, "clear_style_image": True},
+            )
+            assert response.status_code == 200
+            project = manager.load_project("ready")
+            assert project["style"] == "低饱和暖色调。\n柔和侧光。"
+            assert not {"style_template_id", "style_image", "style_description"}.intersection(project)
+            assert project["style"] in build_scene_prompt("庭院", "落日中的庭院", style=project["style"])
+
+            response = client.patch("/api/v1/projects/ready", json={"style_template_id": "live_premium_drama"})
+            assert response.status_code == 200
+            assert manager.load_project("ready")["style_template_id"] == "live_premium_drama"
+            assert manager.load_project("ready")["style"] != project["style"]
+
     def test_global_prompt_persists_preserves_omitted_value_and_clears(self, tmp_path, monkeypatch):
         manager = ProjectManager(tmp_path)
         manager.create_project("ready")

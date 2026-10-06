@@ -478,3 +478,9 @@ An episode or short video is complete only when it meets at least the following 
 Enter a **Global prompt** under **Project Settings → Agent profile** to add instructions for this project's built-in Agent, such as reply style, creative steps, or content constraints. These instructions apply only to the current project.
 
 After saving, new conversations include these instructions; existing conversations keep their original configuration. Start a new conversation to use an updated prompt. Clear the field and save to remove the additional rules while preserving the built-in and customized project configuration.
+
+## 12. Custom Text Style {#project-text-style}
+
+Under **Project Settings → Style**, select **Custom text style** and describe the visual style, colors, lighting, or texture without uploading a reference image. Select **Use this style**, then **Save** at the bottom of the page. Generation uses the saved description as the project's style.
+
+Presets, text descriptions, and reference images are mutually exclusive. Saving a text style removes the previous preset or reference-image setting. Use **Edit text style** to change it or **Clear style** to remove it. The original reference-image file is preserved.

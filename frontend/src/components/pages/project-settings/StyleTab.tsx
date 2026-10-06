@@ -1,9 +1,10 @@
 import { TruncatedText } from "@/components/shared/TruncatedText";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { ImageOff } from "lucide-react";
+import { ImageOff, Type } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Dialog,
   DialogBody,
@@ -61,6 +62,9 @@ function CurrentStyle({ value: style }: { value: ProjectStyle }) {
   } else if (style.kind === "image") {
     name = t("style_custom");
     summary = style.file ? t("style_pending_upload_desc") : style.description;
+  } else if (style.kind === "text") {
+    name = t("style_text_custom");
+    summary = style.text;
   } else {
     name = t("style_not_set");
     summary = t("style_not_set_desc");
@@ -71,6 +75,8 @@ function CurrentStyle({ value: style }: { value: ProjectStyle }) {
       <div className="grid h-18 w-13.5 shrink-0 place-items-center overflow-hidden rounded-md border border-border bg-muted">
         {thumbnail ? (
           <img src={thumbnail} alt="" className="size-full object-cover" />
+        ) : style.kind === "text" ? (
+          <Type aria-hidden className="size-4 text-muted-foreground" />
         ) : (
           <ImageOff aria-hidden className="size-4 text-muted-foreground" />
         )}
@@ -88,12 +94,14 @@ export function StyleTab({ value: style, onChange }: { value: ProjectStyle; onCh
   const { t } = useTranslation("dashboard");
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<StylePickerValue>(() => toPickerValue(style));
+  const [textOpen, setTextOpen] = useState(false);
+  const [textDraft, setTextDraft] = useState("");
 
   return (
     <div className="flex flex-col gap-6">
       <TabHeader title={t("project_settings_tab_style")} description={t("project_style_desc")} />
 
-      <div className="flex items-center justify-between gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <CurrentStyle value={style} />
         <div className="flex shrink-0 items-center gap-2">
           {style.kind !== "none" && (
@@ -101,6 +109,15 @@ export function StyleTab({ value: style, onChange }: { value: ProjectStyle; onCh
               {t("style_clear")}
             </Button>
           )}
+          <Button
+            variant="outline"
+            onClick={() => {
+              setTextDraft(style.kind === "text" ? style.text : "");
+              setTextOpen(true);
+            }}
+          >
+            {style.kind === "text" ? t("style_text_edit") : t("style_text_custom")}
+          </Button>
           <Button
             variant="outline"
             onClick={() => {
@@ -112,6 +129,36 @@ export function StyleTab({ value: style, onChange }: { value: ProjectStyle; onCh
           </Button>
         </div>
       </div>
+
+      <Dialog open={textOpen} onOpenChange={setTextOpen}>
+        <DialogContent size="lg">
+          <DialogHeader>
+            <DialogTitle>{t("style_text_custom")}</DialogTitle>
+            <DialogDescription>{t("style_text_description")}</DialogDescription>
+          </DialogHeader>
+          <DialogBody>
+            <Textarea
+              aria-label={t("style_text_custom")}
+              value={textDraft}
+              onChange={(event) => setTextDraft(event.target.value)}
+              placeholder={t("style_text_placeholder")}
+              rows={6}
+            />
+          </DialogBody>
+          <DialogFooter>
+            <DialogClose render={<Button variant="outline" />}>{t("common:cancel")}</DialogClose>
+            <Button
+              disabled={!textDraft.trim()}
+              onClick={() => {
+                onChange({ kind: "text", text: textDraft.trim() });
+                setTextOpen(false);
+              }}
+            >
+              {t("style_dialog_apply")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent size="xl">

@@ -19,10 +19,11 @@ export interface GlobalModelDefaults {
   textComplex: string;
 }
 
-/** 项目的风格：模版与参考图二选一，也可以都不设。 */
+/** 项目的风格：预设、文字描述或参考图，也可以不设。 */
 export type ProjectStyle =
   | { kind: "none" }
   | { kind: "template"; templateId: string }
+  | { kind: "text"; text: string }
   | {
       kind: "image";
       /** 已保存的参考图地址，或待上传文件的 blob: 地址。 */
@@ -157,6 +158,7 @@ export function deriveForm(
   const rawTarget = project.target_duration;
   const styleImage = str(project.style_image);
   const templateId = str(project.style_template_id);
+  const styleText = str(project.style).trim();
 
   return {
     // 后端 get_aspect_ratio() 未设置时按 9:16 生成，这里显示实际生效的比例
@@ -169,7 +171,9 @@ export function deriveForm(
       ? { kind: "image", preview: styleImageUrl(projectName, styleImage), description: str(project.style_description), file: null }
       : templateId
         ? { kind: "template", templateId }
-        : { kind: "none" },
+        : styleText
+          ? { kind: "text", text: styleText }
+          : { kind: "none" },
     models: {
       ...models,
       defaultDuration: finiteOrNull(project.default_duration),
@@ -199,7 +203,7 @@ export function gridToggleVisible(facts: ProjectFacts): boolean {
 }
 
 /**
- * 生成项目 PATCH 的请求体。风格选了模版或被清除时一并写入；选了新参考图时不在这里，
+ * 生成项目 PATCH 的请求体。预设、文字风格与清除操作一并写入；选了新参考图时不在这里，
  * 由随后的参考图上传写入（上传同时清掉模版）。
  */
 export function buildProjectPatch(
@@ -233,7 +237,11 @@ export function buildProjectPatch(
       ? {}
       : value.style.kind === "template"
         ? { style_template_id: value.style.templateId }
-        : { style_template_id: null, clear_style_image: true };
+        : {
+            style_template_id: null,
+            clear_style_image: true,
+            ...(value.style.kind === "text" ? { style: value.style.text.trim() } : {}),
+          };
 
   return {
     video_backend: models.videoBackend || null,

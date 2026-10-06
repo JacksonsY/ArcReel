@@ -1078,9 +1078,10 @@ async def update_project(name: str, req: UpdateProjectRequest, _t: Translator):
 
                 if "style_template_id" in req.model_fields_set:
                     if req.style_template_id is None:
-                        # 取消模版选择：同时清掉展开的 style prompt，避免遗留孤儿文本
+                        # 取消预设时清掉展开文本；请求同时提供自定义文字时保留新文字。
                         project.pop("style_template_id", None)
-                        project["style"] = ""
+                        if req.style is None:
+                            project["style"] = ""
                     else:
                         if not is_known_template(req.style_template_id):
                             raise HTTPException(

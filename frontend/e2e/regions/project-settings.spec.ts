@@ -107,6 +107,20 @@ async function tabReady(page: Page, title: string) {
 
 defineRegionScenarios("项目设置", [
   {
+    name: "文字风格：长描述可编辑，输入框与对话框按钮均可访问",
+    path: settings("style"),
+    api: projectWith({ style: "电影写实风格，低饱和暖色调，柔和侧光，细腻胶片颗粒感。\n".repeat(35), style_template_id: null, style_image: null, style_description: null }),
+    ready: (page) => tabReady(page, "风格"),
+    act: async (page) => {
+      await page.getByRole("button", { name: "编辑文字风格" }).click();
+      const dialog = page.getByRole("dialog", { name: "自定义文字风格" });
+      await dialog.waitFor();
+      await expect(dialog.getByRole("textbox", { name: "自定义文字风格" })).toHaveValue(/低饱和暖色调/);
+      await expect(dialog.getByRole("button", { name: "使用此风格" })).toBeInViewport({ ratio: 1 });
+      await waitForAnimations(page);
+    },
+  },
+  {
     name: "基础分页：改动后侧栏标出修改，外壳底行的保存栏在表单滚到底时完整可见",
     path: settings(),
     ready: (page) => tabReady(page, "基础"),

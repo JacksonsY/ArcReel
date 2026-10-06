@@ -64,11 +64,19 @@ function mockConfig(config: object = FAKE_CONFIG) {
 
 /** 加载项目，保存时按服务端行为回显合并后的项目。 */
 function mockProject(project: Record<string, unknown>) {
-  const base = { title: "Demo", episodes: [], characters: {}, clues: {}, ...project };
+  const base: UpdateResponse["project"] = { title: "Demo", content_mode: "narration", style: "", episodes: [], characters: {}, ...project };
   vi.spyOn(API, "getProject").mockResolvedValue({ project: base, scripts: {} } as unknown as ProjectResponse);
   return vi
     .spyOn(API, "updateProject")
-    .mockImplementation(async (_name, patch) => ({ success: true, project: { ...base, ...patch } }) as UpdateResponse);
+    .mockImplementation(async (_name, patch) => {
+      const next = { ...base, ...patch };
+      if (patch.clear_style_image) {
+        delete next.style_image;
+        delete next.style_description;
+      }
+      if (patch.style_template_id === null && patch.style === undefined) next.style = "";
+      return { success: true, project: next } as UpdateResponse;
+    });
 }
 
 function renderAt(path: string) {
@@ -112,6 +120,44 @@ beforeEach(() => {
 });
 
 describe("ProjectSettingsPage – 分页与一次保存", () => {
+  it("自定义文字风格替换预设或参考图，保存后可再次编辑和清除", async () => {
+    const updateSpy = mockProject({ style_template_id: "live_premium_drama", style_image: "style.png", style_description: "旧图片风格" });
+    renderAt("/app/projects/demo/settings?tab=style");
+    fireEvent.click(await screen.findByRole("button", { name: "自定义文字风格" }));
+    const dialog = await screen.findByRole("dialog", { name: "自定义文字风格" });
+    const apply = within(dialog).getByRole("button", { name: "使用此风格" });
+    expect(apply).toBeDisabled();
+    fireEvent.change(within(dialog).getByRole("textbox"), { target: { value: "  低饱和暖色调。\n柔和侧光。  " } });
+    fireEvent.click(apply);
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(updateSpy).not.toHaveBeenCalled();
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(updateSpy).toHaveBeenCalledWith("demo", expect.objectContaining({
+      style: "低饱和暖色调。\n柔和侧光。", style_template_id: null, clear_style_image: true,
+    })));
+    await waitFor(() => expect(screen.getByRole("button", { name: "编辑文字风格" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "编辑文字风格" }));
+    expect(within(await screen.findByRole("dialog", { name: "自定义文字风格" })).getByRole("textbox")).toHaveValue("低饱和暖色调。\n柔和侧光。");
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    fireEvent.click(screen.getByRole("button", { name: "清除风格" }));
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(updateSpy.mock.lastCall?.[1]).toEqual(expect.objectContaining({ style_template_id: null, clear_style_image: true })));
+    expect(updateSpy.mock.lastCall?.[1]).not.toHaveProperty("style");
+  });
+
+  it("已有文字风格能回显，取消编辑不会改变已保存的文字", async () => {
+    const updateSpy = mockProject({ style: "黑白胶片风格。" });
+    renderAt("/app/projects/demo/settings?tab=style");
+    fireEvent.click(await screen.findByRole("button", { name: "编辑文字风格" }));
+    const dialog = await screen.findByRole("dialog", { name: "自定义文字风格" });
+    expect(within(dialog).getByRole("textbox")).toHaveValue("黑白胶片风格。");
+    fireEvent.change(within(dialog).getByRole("textbox"), { target: { value: "新文字" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    expect(updateSpy).not.toHaveBeenCalled();
+    expect(screen.getByText("黑白胶片风格。")).toBeInTheDocument();
+    expect(saveButton()).toBeDisabled();
+  });
+
   it("没有 tab 参数时落在「基础」，侧栏分「项目」「Agent」两组", async () => {
     mockProject({});
     renderAt("/app/projects/demo/settings");
