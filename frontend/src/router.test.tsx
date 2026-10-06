@@ -76,9 +76,23 @@ describe("AppRoutes", () => {
 
   it("renders 404 for unknown routes", () => {
     renderAt("/not-found");
-    expect(screen.getByText("404")).toBeInTheDocument();
-    expect(screen.getByText("页面未找到")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "页面未找到" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "返回首页" })).toHaveAttribute("href", "/app/projects");
   });
+
+  // 旧的 lorebook、clues 入口已移除且不重定向；项目内未注册的子路径保留工作区外壳，空状态由画布显示。
+  it.each(["/app/projects/demo/lorebook", "/app/projects/demo/clues", "/app/projects/demo/unknown/"])(
+    "keeps the workspace shell for the unregistered workspace path %s",
+    async (path) => {
+      vi.spyOn(API, "getProject").mockResolvedValue({
+        project: { title: "Demo", content_mode: "narration", style: "Anime", episodes: [], characters: {}, scenes: {}, props: {} },
+        scripts: {},
+      });
+      renderAt(path);
+      expect(await screen.findByTestId("studio-canvas-router")).toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "页面未找到" })).not.toBeInTheDocument();
+    },
+  );
 
   it("loads project workspace and resets assistant state", async () => {
     vi.spyOn(API, "getProject").mockResolvedValue({
@@ -282,7 +296,7 @@ describe("AppRoutes", () => {
     // 回归：AuthGuard 渲染在 nest 路由内，相对的 /login 会被拼成
     // /app/projects/demo/login（无匹配 → 404）；用 ~/login 绝对路径才落到 /login。
     expect(await screen.findByTestId("login-page")).toBeInTheDocument();
-    expect(screen.queryByText("404")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "页面未找到" })).not.toBeInTheDocument();
   });
 
   it("redirects the demo project's settings deep link to global settings", async () => {
@@ -325,24 +339,4 @@ describe("AppRoutes", () => {
     await vi.advanceTimersByTimeAsync(1600);
     expect(API.getProviders).toHaveBeenCalledTimes(3);
   });
-
-  it.each([
-    [false, false],
-    [true, true],
-  ])(
-    "无开合记忆时按内嵌智能体凭证状态初始化面板: configured=%s",
-    async (isEmbeddedAgentConfigured, expectedOpen) => {
-      useAppStore.setState({
-        assistantPanelOpen: !expectedOpen,
-        assistantPanelInitialized: false,
-      });
-      useConfigStatusStore.setState({ initialized: true, isEmbeddedAgentConfigured });
-
-      renderAt("/app/projects");
-
-      await waitFor(() => {
-        expect(useAppStore.getState().assistantPanelOpen).toBe(expectedOpen);
-      });
-    },
-  );
 });

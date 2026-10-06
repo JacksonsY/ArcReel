@@ -1,10 +1,19 @@
-import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { Eye, RefreshCw } from "lucide-react";
-import { CopyButton } from "@/components/ui/CopyButton";
-import { GlassModal } from "@/components/ui/GlassModal";
-import { ModalCloseButton } from "@/components/ui/ModalCloseButton";
+import { Check, Copy, Eye, RefreshCw } from "lucide-react";
+import { cn } from "cn";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { errMsg } from "@/utils/async";
+import { copyText } from "@/utils/clipboard";
 import type { RenderedPromptPreview } from "@/types";
 
 export interface PromptPreviewButtonProps<T extends RenderedPromptPreview> {
@@ -17,6 +26,9 @@ export interface PromptPreviewButtonProps<T extends RenderedPromptPreview> {
   /** 在最终文本下方追加的区块，拿到的是本次请求的完整结果（如随请求发出的参考图列表）。 */
   renderExtra?: (result: T) => ReactNode;
   disabled?: boolean;
+  /** 有未保存修改时先保存；失败则保留原处，不打开预览。回调需用 useCallback。 */
+  beforeOpen?: () => Promise<boolean>;
+  saveFirst?: boolean;
 }
 
 /**
@@ -30,30 +42,28 @@ export function PromptPreviewButton<T extends RenderedPromptPreview>({
   notice,
   renderExtra,
   disabled,
+  beforeOpen,
+  saveFirst,
 }: PromptPreviewButtonProps<T>) {
   const { t } = useTranslation("dashboard");
-  const titleId = useId();
+  const [preparing, setPreparing] = useState(false);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  const loadRef = useRef(load);
-  useEffect(() => {
-    loadRef.current = load;
-  }, [load]);
+  const [copied, setCopied] = useState(false);
 
   // 接管方轮换 controller：新一轮加载先作废上一轮，被作废方不再回写共享状态。
   const inflight = useRef<AbortController | null>(null);
-  const fetchPreview = useCallback(async () => {
-    inflight.current?.abort();
-    const controller = new AbortController();
+  const fetchPreview = useCallback(async (prepared?: AbortController) => {
+    if (!prepared) inflight.current?.abort();
+    const controller = prepared ?? new AbortController();
     inflight.current = controller;
     const { signal } = controller;
     setLoading(true);
     setError(null);
     try {
-      const next = await loadRef.current(signal);
+      const next = await load(signal);
       if (signal.aborted || inflight.current !== controller) return;
       setResult(next);
     } catch (e) {
@@ -62,14 +72,31 @@ export function PromptPreviewButton<T extends RenderedPromptPreview>({
     } finally {
       if (!signal.aborted && inflight.current === controller) setLoading(false);
     }
-  }, []);
+  }, [load]);
 
   // 卸载时作废在途请求：清理函数不写 state，只切断被接管方的回写。
   useEffect(() => () => inflight.current?.abort(), []);
 
-  const handleOpen = () => {
-    setOpen(true);
-    void fetchPreview();
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), 1500);
+    return () => clearTimeout(timer);
+  }, [copied]);
+
+  const handleOpen = async () => {
+    if (preparing) return;
+    inflight.current?.abort();
+    const controller = new AbortController();
+    inflight.current = controller;
+    setPreparing(true);
+    try {
+      if (beforeOpen && !(await beforeOpen())) return;
+      if (controller.signal.aborted || inflight.current !== controller) return;
+      setOpen(true);
+      await fetchPreview(controller);
+    } finally {
+      if (!controller.signal.aborted && inflight.current === controller) setPreparing(false);
+    }
   };
 
   // 每次打开都重新取：关闭时丢弃结果，免得下次打开先闪出过期的文本。
@@ -78,106 +105,76 @@ export function PromptPreviewButton<T extends RenderedPromptPreview>({
     inflight.current = null;
     setOpen(false);
     setLoading(false);
+    setPreparing(false);
     setResult(null);
     setError(null);
+    setCopied(false);
+  };
+
+  // 复制成功才显示「已复制」：非安全上下文走 execCommand 兜底，兜底也失败时不假报成功
+  const handleCopy = (text: string) => {
+    void copyText(text).then(
+      () => setCopied(true),
+      () => undefined,
+    );
   };
 
   return (
     <>
-      <button
-        type="button"
-        onClick={handleOpen}
-        disabled={disabled}
-        title={title}
-        className="focus-ring inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] transition-colors hover:bg-white/5 disabled:cursor-default disabled:opacity-40"
-        style={{ color: "var(--color-text-3)" }}
+      <Button variant="ghost" size="xs" onClick={() => void handleOpen()} disabled={disabled || preparing} title={title}>
+        <Eye aria-hidden data-icon="inline-start" />
+        {t(saveFirst ? "prompt_preview_save_first" : "prompt_preview_open")}
+      </Button>
+      <Dialog
+        open={open}
+        onOpenChange={(next) => {
+          if (!next) handleClose();
+        }}
       >
-        <Eye aria-hidden className="h-3 w-3" />
-        {t("prompt_preview_open")}
-      </button>
-      <GlassModal open={open} onClose={handleClose} labelledBy={titleId} widthClassName="w-full max-w-2xl">
-        <div
-          className="flex items-start justify-between gap-4 px-5 py-4"
-          style={{ borderBottom: "1px solid var(--color-hairline-soft)" }}
-        >
-          <div className="min-w-0">
-            <h2
-              id={titleId}
-              className="text-[14px] font-semibold tracking-tight"
-              style={{ color: "var(--color-text)" }}
-            >
-              {title}
-            </h2>
-            {notice ? (
-              <p className="mt-1 text-[11px] leading-[1.5]" style={{ color: "var(--color-text-4)" }}>
-                {notice}
-              </p>
+        <DialogContent size="lg">
+          <DialogHeader>
+            <DialogTitle>{title}</DialogTitle>
+            {notice ? <DialogDescription>{notice}</DialogDescription> : null}
+          </DialogHeader>
+          <DialogBody>
+            <div className="flex flex-col gap-3">
+              {loading && !result ? (
+                <p className="text-sm text-muted-foreground">{t("prompt_preview_loading")}</p>
+              ) : null}
+              {error ? <p className="text-sm text-destructive">{error}</p> : null}
+              {result?.unavailable ? <p className="text-sm text-muted-foreground">{result.unavailable}</p> : null}
+              {result?.warnings?.length ? (
+                <ul
+                  aria-label={t("prompt_preview_warnings_label")}
+                  className="flex flex-col gap-1 rounded-md border border-warn/30 bg-warn/10 px-3 py-2 text-xs text-warn"
+                >
+                  {result.warnings.map((warning, index) => (
+                    <li key={`prompt-preview-warning-${index}`}>{warning}</li>
+                  ))}
+                </ul>
+              ) : null}
+              {result?.text ? (
+                <pre className="rounded-md border bg-card p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap text-subtle-foreground wrap-break-word">
+                  {result.text}
+                </pre>
+              ) : null}
+              {result && renderExtra ? renderExtra(result) : null}
+            </div>
+          </DialogBody>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => void fetchPreview()} disabled={loading}>
+              <RefreshCw aria-hidden data-icon="inline-start" className={cn(loading && "animate-spin")} />
+              {t("prompt_preview_refresh")}
+            </Button>
+            {result?.text ? (
+              <Button onClick={() => handleCopy(result.text ?? "")}>
+                {copied ? <Check aria-hidden data-icon="inline-start" /> : <Copy aria-hidden data-icon="inline-start" />}
+                {copied ? t("message_copied") : t("prompt_preview_copy")}
+              </Button>
             ) : null}
-          </div>
-          <div className="flex shrink-0 items-center gap-1">
-            {result?.text ? <CopyButton text={result.text} label={t("prompt_preview_copy")} /> : null}
-            <button
-              type="button"
-              onClick={() => void fetchPreview()}
-              disabled={loading}
-              title={t("prompt_preview_refresh")}
-              aria-label={t("prompt_preview_refresh")}
-              className="focus-ring grid h-6 w-6 place-items-center rounded-md transition-colors hover:bg-white/10 disabled:opacity-40"
-              style={{ color: "var(--color-text-3)" }}
-            >
-              <RefreshCw aria-hidden className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
-            </button>
-            <ModalCloseButton onClick={handleClose} />
-          </div>
-        </div>
-
-        <div className="flex max-h-[65vh] flex-col gap-2 overflow-y-auto px-5 py-4">
-          {loading && !result ? (
-            <p className="text-[11px]" style={{ color: "var(--color-text-4)" }}>
-              {t("prompt_preview_loading")}
-            </p>
-          ) : null}
-          {error ? (
-            <p className="text-[11px]" style={{ color: "var(--color-warm)" }}>
-              {error}
-            </p>
-          ) : null}
-          {result?.unavailable ? (
-            <p className="text-[11px]" style={{ color: "var(--color-text-4)" }}>
-              {result.unavailable}
-            </p>
-          ) : null}
-          {result?.warnings?.length ? (
-            <ul
-              aria-label={t("prompt_preview_warnings_label")}
-              className="space-y-1 rounded px-2 py-1.5 text-[10.5px]"
-              style={{
-                background: "oklch(0.35 0.10 70 / 0.10)",
-                color: "oklch(0.86 0.09 70)",
-                border: "1px solid oklch(0.50 0.12 70 / 0.30)",
-              }}
-            >
-              {result.warnings.map((warning, index) => (
-                <li key={`prompt-preview-warning-${index}`}>{warning}</li>
-              ))}
-            </ul>
-          ) : null}
-          {result?.text ? (
-            <pre
-              className="overflow-auto whitespace-pre-wrap break-words rounded-md border p-3 text-[11.5px] leading-relaxed"
-              style={{
-                borderColor: "var(--color-hairline)",
-                background: "var(--color-bg-grad-a)",
-                color: "var(--color-text-2)",
-                fontFamily: "var(--font-mono)",
-              }}
-            >
-              {result.text}
-            </pre>
-          ) : null}
-          {result && renderExtra ? renderExtra(result) : null}
-        </div>
-      </GlassModal>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

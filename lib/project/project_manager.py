@@ -17,8 +17,10 @@ import secrets
 import shutil
 import time
 import unicodedata
+from collections import Counter
 from collections.abc import AsyncGenerator, Callable, Generator, Mapping, Sequence
 from contextlib import ExitStack, asynccontextmanager, contextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeGuard, cast
@@ -49,7 +51,13 @@ from lib.episode.episode_paths import (
     episode_script_filename,
     episode_script_relpath,
 )
-from lib.episode.episode_sources import SOURCE_ORIGIN_FIELD, WHOLE_SOURCE_FILES_KEY, SourceOrigin
+from lib.episode.episode_sources import (
+    SOURCE_ORIGIN_FIELD,
+    WHOLE_SOURCE_FILES_KEY,
+    SourceOrigin,
+    record_source_remaining,
+    source_planning_inputs,
+)
 from lib.episode.episode_target_duration import (
     EPISODE_TARGET_DURATION_FIELD,
     MAX_EPISODE_TARGET_DURATION,
@@ -65,6 +73,8 @@ from lib.infra.path_safety import PathTraversalError, safe_join
 from lib.infra.schema_guards import is_int, is_shape, is_str
 from lib.infra.validation_messages import ValidationResult, default_translate
 from lib.project.asset_rename import (
+    AssetDeletionPreview,
+    AssetEpisodeReferences,
     AssetRenameConflictError,
     AssetRenameNotFoundError,
     AssetRenameReport,
@@ -93,6 +103,7 @@ from lib.project.asset_types import (
 from lib.project.project_change_hints import emit_project_change_hint
 from lib.project.project_schema import parse_project_schema_version
 from lib.project.script_entry_cleanup import purge_replaced_entry_media
+from lib.project.task_project_claim import ensure_task_project_claim
 from lib.references.reference_catalog import derivative_reference
 from lib.script.draft_quarantine import QUARANTINE_FILENAMES
 from lib.script.reference_video.duration_migration import migrate_script_unit_durations
@@ -298,6 +309,26 @@ def _rename_agnostic_errors(
     return folded
 
 
+#: 删除预览借重命名扫描计数时的改写目标：任何资产名都不会与它判等，命中的引用一律计入。
+_DELETION_SCAN_TARGET = "\x00"
+
+
+@dataclass
+class _AssetReferenceScan:
+    """一次资产引用扫描的结果：改写后的剧本与草稿，以及按集归属的引用处数。"""
+
+    #: ``(剧本文件名, 改写后载荷, 改写前载荷)``
+    scripts: list[tuple[str, dict, dict]] = field(default_factory=list)
+    #: ``(草稿路径, 改写后载荷, 改写前指纹)``
+    drafts: list[tuple[Path, dict, str]] = field(default_factory=list)
+    #: 集目录名（``episode_N``）→ 引用处数；剧本取文件 stem，草稿取所在目录名。
+    episode_references: Counter[str] = field(default_factory=Counter)
+
+    @property
+    def references(self) -> int:
+        return self.episode_references.total()
+
+
 class ProjectManager:
     """视频项目管理器"""
 
@@ -454,12 +485,31 @@ class ProjectManager:
                 return
             except FileNotFoundError:
                 # 目录已不存在——上一次重试已经成功,或并发的另一次删除已经完成,
-                # 删除目的已达成,无需继续重试或报错。
-                return
+                # 删除目的已达成,无需继续重试或报错。目录还在时，是并发的残余目录清理
+                # （remove_project_directory_residue）先删掉了其中的空目录，接着重试。
+                if not project_dir.exists():
+                    return
+                if attempt == attempts - 1:
+                    raise
             except OSError as exc:
                 if exc.errno not in self._DELETE_RETRYABLE_ERRNOS or attempt == attempts - 1:
                     raise
                 time.sleep(0.05)
+
+    def remove_project_directory_residue(self, name: str) -> None:
+        """删除同名项目目录里只剩空目录的残余。
+
+        项目删除后仍在执行的任务，可能经 ``mkdir(parents=True)`` 按旧名补建出空的子目录。目录下
+        有 project.json 时不动，那是同名新建或导入的项目；只删空目录，任何文件都原样保留。
+        """
+        project_dir = safe_join(self.projects_dir, self.normalize_project_name(name))
+        if (project_dir / self.PROJECT_FILE).exists():
+            return
+        for directory, _subdirs, _files in os.walk(project_dir, topdown=False):
+            try:
+                os.rmdir(directory)
+            except OSError:
+                continue
 
     def sync_agent_profile(
         self,
@@ -592,8 +642,13 @@ class ProjectManager:
         return totals
 
     def get_project_path(self, name: str) -> Path:
-        """获取项目路径（含路径遍历防护）"""
+        """获取项目路径（含路径遍历防护）。
+
+        在执行任务的上下文里，项目已在任务执行期间删除时抛 ``ProjectDeletedDuringTaskError``：
+        同名目录此时可能已属于新建或导入的另一个项目。
+        """
         name = self.normalize_project_name(name)
+        ensure_task_project_claim(name)
         try:
             project_dir = safe_join(self.projects_dir, name)
         except PathTraversalError as exc:
@@ -1890,8 +1945,9 @@ class ProjectManager:
         """:meth:`locked_source_mutation` 的登记变体：源文文件与 project.json 的登记在同一把项目锁内改。
 
         产出 ``(source_dir, project, undo)``；块内就地修改 ``project``（整本源文清单、分集账本），块正常
-        退出且 ``project`` 有变化时写回 ``project.json``。调用方每改一处盘上文件，就把它的撤销回调登记进
-        ``undo``；块内抛错或写回 ``project.json`` 失败时不写回，并在锁内按登记的逆序执行这些回调。
+        退出时先按盘上源文重记源文是否还有未规划的原文，``project`` 有变化时写回 ``project.json``。调用方
+        每改一处盘上文件，就把它的撤销回调登记进 ``undo``；块内抛错或写回 ``project.json`` 失败时不写回，
+        并在锁内按登记的逆序执行这些回调。
         """
         project_file = self._get_project_file_path(project_name)
         changed = False
@@ -1901,8 +1957,10 @@ class ProjectManager:
             undo = ExitStack()
             try:
                 yield source_dir, project, undo
+                # 块内可能只改了源文文本、没动登记：源文是否还有未规划的原文每次都按盘上源文重记
+                record_source_remaining(source_dir.parent, project)
                 if json.dumps(project, sort_keys=True, ensure_ascii=False) != before:
-                    self._apply_project_mutation_unlocked(project, lambda _project: None)
+                    self._apply_project_mutation_unlocked(project_name, project, lambda _project: None)
                     atomic_write_json(project_file, project)
                     changed = True
             except BaseException:
@@ -2026,7 +2084,7 @@ class ProjectManager:
                 transaction.enter_context(formal_write_transaction(project_file, *formal_paths))
             with open(project_file, encoding="utf-8") as f:
                 project = json.load(f)
-            self._apply_project_mutation_unlocked(project, mutate_fn)
+            self._apply_project_mutation_unlocked(project_name, project, mutate_fn)
             atomic_write_json(project_file, project)
             if on_commit is not None:
                 on_commit(project_file)
@@ -2156,7 +2214,9 @@ class ProjectManager:
 
         return self.update_project(project_name, _mutate, on_commit=_reconcile_claims)
 
-    def _apply_project_mutation_unlocked(self, project: dict, mutate_fn: Callable[[dict], None]) -> None:
+    def _apply_project_mutation_unlocked(
+        self, project_name: str, project: dict, mutate_fn: Callable[[dict], None]
+    ) -> None:
         """Apply one mutation plus the canonical save-time normalizations.
 
         The caller owns the project lock and is responsible for the durable
@@ -2169,7 +2229,12 @@ class ProjectManager:
             ensure_project_asset_namespace(project)
         # 变更可能把条目移出账本：先让历史最高号记下变更前的集 ID
         raise_episode_id_high_water(project)
+        planning_inputs = source_planning_inputs(project)
         mutate_fn(project)
+        # 分集规划、手工切分、重新规划采纳、重置与删集都经由这里改账本：账本或源文登记变了，
+        # 就按盘上源文重记源文是否还有未规划的原文，项目列表读它而不读源文
+        if source_planning_inputs(project) != planning_inputs:
+            record_source_remaining(self.get_project_path(project_name), project)
         if self._requires_unique_asset_namespace(project):
             ensure_project_asset_namespace(project)
         self._migrate_legacy_resolution_on_save(project)
@@ -2798,6 +2863,44 @@ class ProjectManager:
 
         return self.update_project(project_name, _mutate, on_commit=_forget_claim)
 
+    def preview_asset_deletion(self, project_name: str, table: str, name: str) -> AssetDeletionPreview:
+        """删除资产前的引用预览（只读）：剧本与草稿里有多少处引用会在删除后悬空。
+
+        删除本身不改写这些引用（见 :meth:`delete_asset`），悬空引用要到生成时才被拦下；预览是提前
+        告诉用户的唯一机会。扫描借用重命名的同一套改写，引用数与重命名预览一致，衍生引用
+        （``角色/衍生``）随本体一并计入。
+
+        Raises:
+            FileNotFoundError: 项目不存在。
+            KeyError: 资产不存在。
+        """
+        asset_type = self._resolve_asset_type(table)
+        spec = ASSET_SPECS[asset_type]
+        if not self.project_exists(project_name):
+            raise FileNotFoundError(f"项目不存在: {project_name}")
+        with self._asset_cascade_locks(project_name) as (script_files, draft_files):
+            bucket = self._read_project_raw_unlocked(project_name).get(spec.bucket_key)
+            key = resolve_asset_key(bucket, name)
+            if key is None:
+                raise KeyError(f"{spec.label_zh} '{name}' 不存在")
+            scan = self._scan_asset_references(
+                project_name, script_files, draft_files, asset_type, key, _DELETION_SCAN_TARGET
+            )
+        by_episode: Counter[int] = Counter()
+        for episode_dir, count in scan.episode_references.items():
+            episode = self.filename_episode(episode_dir)
+            if episode is not None:
+                by_episode[episode] += count
+        return AssetDeletionPreview(
+            table=table,
+            name=key,
+            references=scan.references,
+            episodes=tuple(
+                AssetEpisodeReferences(episode=episode, references=count)
+                for episode, count in sorted(by_episode.items())
+            ),
+        )
+
     # bucket_key（characters/scenes/props/products）→ 资产类型，从静态 ASSET_SPECS 派生一次。
     _BUCKET_TO_ASSET_TYPE: ClassVar[dict[str, str]] = {spec.bucket_key: t for t, spec in ASSET_SPECS.items()}
 
@@ -2860,6 +2963,60 @@ class ProjectManager:
         if manifest_path.exists() or manifest_path.is_symlink():
             return ProjectArtifactManifestAdapter(project_dir)
         return None
+
+    def _scan_asset_references(
+        self,
+        project_name: str,
+        script_files: Sequence[str],
+        draft_files: Sequence[Path],
+        asset_type: str,
+        old_name: str,
+        new_name: str,
+    ) -> _AssetReferenceScan:
+        """在 ``_asset_cascade_locks`` 内把剧本与草稿里指向 *old_name* 的引用改写为 *new_name*（只改内存载荷）。
+
+        重命名的预览与执行、删除前的引用预览共用这一次扫描，三者的引用数因此一致。
+        """
+        scan = _AssetReferenceScan()
+        for filename in script_files:
+            script, _migrated = self._read_script_unlocked(project_name, filename)
+            before = copy.deepcopy(script)
+            changes = rewrite_payload_references(script, asset_type, old_name, new_name)
+            if changes:
+                scan.scripts.append((filename, script, before))
+                scan.episode_references[Path(filename).stem] += changes
+        for path in draft_files:
+            payload = load_json_or_none(path)
+            if not isinstance(payload, dict):
+                continue
+            fingerprint = canonical_json_digest(payload)
+            changes = rewrite_payload_references(payload, asset_type, old_name, new_name)
+            if changes:
+                scan.drafts.append((path, payload, fingerprint))
+                scan.episode_references[path.parent.name] += changes
+        return scan
+
+    def _carry_script_plan_confirmations(
+        self, project_dir: Path, project: dict, changed_drafts: Sequence[tuple[Path, dict, str]]
+    ) -> None:
+        """级联改写只换资产的名字，不改规划内容：确认的恰是改写前内容的集，确认指纹随之平移。
+
+        ``changed_drafts`` 是 ``(路径, 改写后载荷, 改写前指纹)``，指纹与确认记录同一口径（整份 JSON 的
+        规范化哈希，见 ``content_fingerprint_of_data``）；只有各集的正式脚本规划参与确认判定。
+        ``project`` 是将随这批改写提交的 project.json 载荷。不平移时确认指纹与改写后的规划对不上，
+        用户只改了个名字，那一集就退回待确认、被引向覆盖正式脚本的确认操作。
+        """
+        # script_review 在模块级 import 本模块，惰性 import 破环。
+        from lib.script.script_review import (
+            carry_confirmation_through_migration,
+            content_fingerprint_of_data,
+            script_plan_path,
+        )
+
+        for path, payload, before in changed_drafts:
+            episode = self.filename_episode(path.parent.name)
+            if episode is not None and script_plan_path(project_dir, project, episode) == path:
+                carry_confirmation_through_migration(project, episode, before, content_fingerprint_of_data(payload))
 
     def rename_asset(
         self, project_name: str, table: str, old_name: str, new_name: str, *, dry_run: bool = False
@@ -2978,27 +3135,9 @@ class ProjectManager:
             )
 
             # —— 扫描（dry-run 预览与执行共用同一套逻辑）——
-            references = 0
-            changed_scripts: list[tuple[str, dict, dict]] = []
-            for filename in script_files:
-                script, _migrated = self._read_script_unlocked(project_name, filename)
-                before = copy.deepcopy(script)
-                changes = rewrite_payload_references(script, asset_type, old_key, new_clean)
-                if changes:
-                    changed_scripts.append((filename, script, before))
-                    references += changes
-            changed_drafts: list[tuple[Path, dict]] = []
-            for path in draft_files:
-                payload = load_json_or_none(path)
-                if not isinstance(payload, dict):
-                    continue
-                changes = rewrite_payload_references(payload, asset_type, old_key, new_clean)
-                if changes:
-                    changed_drafts.append((path, payload))
-                    references += changes
-            episode_ids = {Path(filename).stem for filename, _s, _b in changed_scripts} | {
-                path.parent.name for path, _p in changed_drafts
-            }
+            scan = self._scan_asset_references(project_name, script_files, draft_files, asset_type, old_key, new_clean)
+            changed_scripts = scan.scripts
+            changed_drafts = scan.drafts
 
             moves = plan_asset_file_renames(project_dir, spec, old_key, new_clean)
             version_manager = VersionManager(project_dir)
@@ -3048,8 +3187,8 @@ class ProjectManager:
                 table=table,
                 old_name=old_key,
                 new_name=new_clean,
-                episodes=len(episode_ids),
-                references=references,
+                episodes=len(scan.episode_references),
+                references=scan.references,
                 files=len(moves) + version_files + derivatives.files,
                 dry_run=dry_run,
             )
@@ -3065,7 +3204,8 @@ class ProjectManager:
                     sync_project=False,
                     before=before,
                 )
-            for path, payload in changed_drafts:
+            self._carry_script_plan_confirmations(project_dir, mutated, changed_drafts)
+            for path, payload, _fingerprint in changed_drafts:
                 atomic_write_json(path, payload)
             for src, dst in moves:
                 if src.exists():
@@ -3137,13 +3277,14 @@ class ProjectManager:
                 before = copy.deepcopy(script)
                 if rewrite_payload_references(script, asset_type, old_reference, new_reference):
                     changed_scripts.append((filename, script, before))
-            changed_drafts: list[tuple[Path, dict]] = []
+            changed_drafts: list[tuple[Path, dict, str]] = []
             for path in draft_files:
                 payload = load_json_or_none(path)
                 if not isinstance(payload, dict):
                     continue
+                fingerprint = canonical_json_digest(payload)
                 if rewrite_payload_references(payload, asset_type, old_reference, new_reference):
-                    changed_drafts.append((path, payload))
+                    changed_drafts.append((path, payload, fingerprint))
 
             # 衍生资产图的三样坐标（图、版本快照、清单键）都含衍生名，与条目键一起搬；
             # 规划先于任何写入，冲突在此整体拒绝、零字节落盘。
@@ -3168,7 +3309,8 @@ class ProjectManager:
                     sync_project=False,
                     before=before,
                 )
-            for path, payload in changed_drafts:
+            self._carry_script_plan_confirmations(project_dir, project, changed_drafts)
+            for path, payload, _fingerprint in changed_drafts:
                 atomic_write_json(path, payload)
             relocation.relocate()
             self._touch_metadata(project)
@@ -3290,15 +3432,16 @@ class ProjectManager:
                     storyboards=storyboards,
                     videos=videos,
                 )
-            changed_drafts: list[tuple[Path, dict]] = []
+            changed_drafts: list[tuple[Path, dict, str]] = []
             for path in draft_files:
                 payload = load_json_or_none(path)
                 if not isinstance(payload, dict):
                     continue
+                fingerprint = canonical_json_digest(payload)
                 changes = merge_payload_references(payload, asset_type, source, target, as_derivative=as_derivative)
                 if not changes.total:
                     continue
-                changed_drafts.append((path, payload))
+                changed_drafts.append((path, payload, fingerprint))
                 category = "draft" if path.name in QUARANTINE_FILENAMES else "script_plan"
                 tally(
                     self.filename_episode(path.parent.name),
@@ -3378,7 +3521,8 @@ class ProjectManager:
             # —— 落盘 ——
             for filename, script, before in changed_scripts:
                 self._write_script_unlocked(project_name, script, filename, sync_project=False, before=before)
-            for path, payload in changed_drafts:
+            self._carry_script_plan_confirmations(project_dir, mutated, changed_drafts)
+            for path, payload, _fingerprint in changed_drafts:
                 atomic_write_json(path, payload)
             relocation.relocate()
             self._touch_metadata(mutated)
@@ -3465,7 +3609,7 @@ class ProjectManager:
                 locked_bucket[key][spec.sheet_field] = sheet_path
 
             with formal_write_transaction(project_file, target):
-                self._apply_project_mutation_unlocked(project, _mutate)
+                self._apply_project_mutation_unlocked(project_name, project, _mutate)
                 atomic_write_json(project_file, project)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 atomic_write_bytes(target, content)

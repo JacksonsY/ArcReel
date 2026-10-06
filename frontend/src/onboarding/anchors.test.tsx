@@ -12,7 +12,7 @@ import { memoryLocation } from "wouter/memory-location";
 import i18n from "@/i18n";
 import { API } from "@/api";
 import { GlobalHeader } from "@/components/layout/GlobalHeader";
-import { OverviewCanvas } from "@/components/canvas/OverviewCanvas";
+import { OverviewCanvas } from "@/components/canvas/overview/OverviewCanvas";
 import { CharactersPage } from "@/components/canvas/lorebook/CharactersPage";
 import { TimelineCanvas } from "@/components/canvas/timeline/TimelineCanvas";
 import { ProjectsPage } from "@/components/pages/ProjectsPage";
@@ -38,16 +38,11 @@ vi.mock("@/components/pages/CreateProjectModal", () => ({
 
 // 顶栏与分镜画布的重子组件与锚点无关，替身挡掉它们各自的数据依赖。
 vi.mock("@/components/usage/UsageHeaderEntry", () => ({ UsageHeaderEntry: () => null }));
-vi.mock("@/components/layout/WorkspaceNotificationsDrawer", () => ({ WorkspaceNotificationsDrawer: () => null }));
 vi.mock("@/components/canvas/timeline/ScriptReviewGate", async () => {
   const { scriptReviewGateMock } = await import("@/__mocks__/ScriptReviewGate");
   return scriptReviewGateMock();
 });
 vi.mock("@/components/canvas/timeline/ShotSplitView", () => ({ ShotSplitView: () => null }));
-vi.mock("@/components/canvas/timeline/EpisodeHeader", async () => {
-  const { episodeHeaderMock } = await import("@/__mocks__/EpisodeHeader");
-  return episodeHeaderMock();
-});
 
 function renderLobby() {
   const { hook } = memoryLocation({ path: "/app/projects" });
@@ -103,9 +98,7 @@ const RENDERERS: Record<OnboardingAnchor, () => void> = {
       <CharactersPage
         projectName={DEMO_PROJECT_NAME}
         characters={buildDemoProjectData(demoT).characters ?? {}}
-        onSaveCharacter={vi.fn()}
         onGenerateCharacter={vi.fn()}
-        onAddCharacter={vi.fn()}
         readOnly
       />,
     );
@@ -113,6 +106,8 @@ const RENDERERS: Record<OnboardingAnchor, () => void> = {
   [ONBOARDING_ANCHORS.workbenchTimeline]: () => {
     render(
       <TimelineCanvas
+        view="board"
+        onViewChange={vi.fn()}
         projectName={DEMO_PROJECT_NAME}
         episode={DEMO_SCRIPTED_EPISODE}
         hasDraft

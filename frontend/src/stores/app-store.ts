@@ -8,10 +8,17 @@ import type {
   WorkspaceNotificationTarget,
 } from "@/types";
 
+/** 提示上的操作按钮，用于可逆操作的「撤销」；点击后执行回调并关闭这条提示。 */
+interface ToastAction {
+  label: string;
+  onClick: () => void;
+}
+
 interface Toast {
   id: string;
   text: string;
   tone: "info" | "success" | "error" | "warning";
+  action?: ToastAction;
 }
 
 interface FocusedContext {
@@ -22,9 +29,9 @@ interface FocusedContext {
 const PLAYBACK_START_TTL_MS = 8000;
 const ALL_ENTITIES_REVISION_KEY = "__all__";
 
-export const ASSISTANT_PANEL_DEFAULT_WIDTH = 505;
-export const ASSISTANT_PANEL_MIN_WIDTH = 360;
-export const ASSISTANT_PANEL_MAX_WIDTH = 720;
+export const ASSISTANT_PANEL_DEFAULT_WIDTH = 420;
+export const ASSISTANT_PANEL_MIN_WIDTH = 320;
+export const ASSISTANT_PANEL_MAX_WIDTH = 640;
 const ASSISTANT_PANEL_WIDTH_STORAGE_KEY = "arcreel_assistant_panel_width";
 const ASSISTANT_PANEL_OPEN_STORAGE_KEY = "arcreel_assistant_panel_open";
 
@@ -68,8 +75,6 @@ function persistAssistantPanelOpen(open: boolean): void {
   }
 }
 
-const initialAssistantPanelOpen = readPersistedAssistantPanelOpen();
-
 interface AppState {
   // Context focus (design doc "Context-Aware" feature)
   focusedContext: FocusedContext | null;
@@ -85,15 +90,14 @@ interface AppState {
   assistantToolActivitySuppressed: boolean;
   setAssistantToolActivitySuppressed: (suppressed: boolean) => void;
 
-  // Toast
+  // Toast：最近一次发出的提示，由 ToastOverlay 转交提示队列显示
   toast: Toast | null;
-  pushToast: (text: string, tone?: Toast["tone"]) => void;
+  pushToast: (text: string, tone?: Toast["tone"], options?: { action?: ToastAction }) => void;
   pushNotification: (
     text: string,
     tone?: Toast["tone"],
     options?: { target?: WorkspaceNotificationTarget | null },
   ) => void;
-  clearToast: () => void;
   workspaceNotifications: WorkspaceNotification[];
   pushWorkspaceNotification: (input: WorkspaceNotificationInput) => void;
   markWorkspaceNotificationRead: (id: string) => void;
@@ -101,12 +105,12 @@ interface AppState {
   removeWorkspaceNotification: (id: string) => void;
   clearWorkspaceNotifications: () => void;
 
-  // Panels
+  // Agent 面板：默认展开，用户手动开合（toggleAssistantPanel）后记住选择；
+  // 程序打开（setAssistantPanelOpen，如把指令预填进输入框）只影响本次，不覆盖用户的选择。
   assistantPanelOpen: boolean;
-  assistantPanelInitialized: boolean;
-  initializeAssistantPanel: (openByDefault: boolean) => void;
   toggleAssistantPanel: () => void;
   setAssistantPanelOpen: (open: boolean) => void;
+  /** 展开时的宽度；挤压画布时实际宽度还受画布最小宽度约束。 */
   assistantPanelWidth: number;
   setAssistantPanelWidth: (width: number) => void;
   persistAssistantPanelWidth: () => void;
@@ -133,8 +137,8 @@ interface AppState {
 /**
  * 通知系统分工规则：
  *
- * - pushToast(text, tone)
- *     用于：用户主动操作的即时反馈。
+ * - pushToast(text, tone, { action? })
+ *     用于：用户主动操作的即时反馈。可逆操作附「撤销」action；不可逆操作先用 AlertDialog 确认。
  *     典型：表单保存/校验、导入/删除/切换/上传成功、scroll target 未找到、
  *          后台任务提交成功回执（task_submitted）、入队请求同步失败
  *          （用户在场可立即重试，不进 drawer）、轻量错误提示。
@@ -215,9 +219,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ assistantToolActivitySuppressed: suppressed }),
 
   toast: null,
-  pushToast: (text, tone = "info") =>
+  pushToast: (text, tone = "info", options) =>
     set({
-      toast: { id: `${Date.now()}-${Math.random()}`, text, tone },
+      toast: { id: `${Date.now()}-${Math.random()}`, text, tone, action: options?.action },
     }),
   pushNotification: (text, tone = "info", options) =>
     set((s) => ({
@@ -227,7 +231,6 @@ export const useAppStore = create<AppState>((set, get) => ({
         ...s.workspaceNotifications,
       ].slice(0, MAX_WORKSPACE_NOTIFICATIONS),
     })),
-  clearToast: () => set({ toast: null }),
   workspaceNotifications: [],
   pushWorkspaceNotification: (input) =>
     set((s) => ({
@@ -254,24 +257,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     })),
   clearWorkspaceNotifications: () => set({ workspaceNotifications: [] }),
 
-  assistantPanelOpen: initialAssistantPanelOpen ?? false,
-  assistantPanelInitialized: initialAssistantPanelOpen !== null,
-  initializeAssistantPanel: (openByDefault) =>
-    set((s) => {
-      if (s.assistantPanelInitialized) return s;
-      return {
-        assistantPanelOpen: readPersistedAssistantPanelOpen() ?? openByDefault,
-        assistantPanelInitialized: true,
-      };
-    }),
+  assistantPanelOpen: readPersistedAssistantPanelOpen() ?? true,
   toggleAssistantPanel: () =>
     set((s) => {
       const open = !s.assistantPanelOpen;
       persistAssistantPanelOpen(open);
-      return { assistantPanelOpen: open, assistantPanelInitialized: true };
+      return { assistantPanelOpen: open };
     }),
-  setAssistantPanelOpen: (open) =>
-    set({ assistantPanelOpen: open, assistantPanelInitialized: true }),
+  setAssistantPanelOpen: (open) => set({ assistantPanelOpen: open }),
   assistantPanelWidth: readPersistedAssistantPanelWidth(),
   setAssistantPanelWidth: (width) =>
     set({ assistantPanelWidth: clampAssistantPanelWidth(width) }),

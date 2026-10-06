@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import {
+  AlertTriangle,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -8,25 +9,44 @@ import {
   Clock,
   Loader2,
   Plus,
-  Save,
-  Scissors,
-  Sparkles,
   Trash2,
 } from "lucide-react";
+import { useEditUnit, type EditUnit } from "@/components/shared/edit-unit/useEditUnit";
+import { RetainedEditUnit } from "@/components/shared/edit-unit/RetainedEditUnit";
+import { useConfirmLeave, useLeaveGuard } from "@/components/shared/edit-unit/LeaveGuard";
+import { UnsavedChangesBar } from "@/components/shared/edit-unit/UnsavedChangesBar";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { useStaysInEpisodeView } from "@/components/canvas/episode-page/EpisodeViewScope";
 import { UnitList } from "./UnitList";
 import { UnitRail } from "./UnitRail";
 import { UnitPreviewPanel } from "./UnitPreviewPanel";
 import { ReferenceVideoCard } from "./ReferenceVideoCard";
 import { ScriptPreviewPanel } from "./ScriptPreviewPanel";
-import { deriveUnitStatus } from "./unit-status";
+import { STATUS_CONF, deriveUnitStatus } from "./unit-status";
 import { tierProblemText } from "./unit-tier-problem";
 import { ReferenceSplitAlert } from "./ReferenceSplitAlert";
-import { EpisodeHeader } from "./EpisodeHeader";
 import { ReferenceDurationConfirmDialog } from "./ReferenceDurationConfirmDialog";
 import { ReferenceBatchAdmissionDialog } from "./ReferenceBatchAdmissionDialog";
 import { referenceBatchOutcome } from "./batch-outcome";
-import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { AdScriptButton, AdScriptProgress } from "@/components/canvas/shared/AdScriptDialog";
+import { BatchFillButton, useBatchGap } from "@/components/canvas/episode-page/BatchFillButton";
+import { EpisodeHeaderActions } from "@/components/canvas/episode-page/EpisodeHeaderActions";
+import type { EpisodeCanvasContext } from "@/components/canvas/episode-page/EpisodePage";
 import { NoScriptBlankState } from "@/components/canvas/shared/StartBlankScriptButton";
 import { computeVoiceLegacyNotice, VoiceLegacyBanner } from "./VoiceLegacyBanner";
 import { useReferenceDurationGate } from "@/hooks/useReferenceDurationGate";
@@ -50,7 +70,6 @@ import {
 import { useAppStore } from "@/stores/app-store";
 import { useProjectsStore } from "@/stores/projects-store";
 import { useCostStore } from "@/stores/cost-store";
-import { useEpisodeSurfaceRequest } from "@/stores/episode-surface-store";
 import { errMsg } from "@/utils/async";
 import { PromptAuthoringButton } from "@/components/canvas/shared/PromptAuthoringButton";
 import {
@@ -67,13 +86,10 @@ import type {
 import { itemIdWithinEpisode } from "@/utils/episode-display";
 import { stepAnchor } from "@/utils/move-anchor";
 
-export interface ReferenceVideoCanvasProps {
+export interface ReferenceVideoCanvasProps extends EpisodeCanvasContext {
   projectName: string;
   episode: number;
-  episodeTitle?: string;
-  onSaveTitle?: (next: string) => Promise<void>;
-  canEditTitle?: boolean;
-  /** prompt_authoring 剧本（scripts/episode_N.json）是否已生成——决定默认 tab（镜像 GridImageToVideoCanvas 的 hasScript 判定）。 */
+  /** prompt_authoring 剧本（scripts/episode_N.json）是否已生成：没有时单元列表无脚本可读，不拉取。 */
   hasScript?: boolean;
   /** ad 参考生视频一阶段产出，不展示 script_plan 脚本规划页。 */
   showPreprocess?: boolean;
@@ -110,28 +126,6 @@ function useUnitFlagSet() {
   return useMemo(() => ({ ids, ref, set }), [ids, set]);
 }
 
-// 容器宽度断点（px，对应设计稿的响应式行为）。
-//   < LIST_RAIL_BREAKPOINT — 左侧 UnitList 收成 56px rail（带 flyout 触发）
-//   < STACK_PREVIEW_BREAKPOINT — 中右合栏，预览叠成 sub-tab
-const LIST_RAIL_BREAKPOINT = 1100;
-const STACK_PREVIEW_BREAKPOINT = 880;
-// 三栏布局下右栏宽度——主区更宽时给预览更大的呼吸空间。
-const PREVIEW_COL_NARROW = 320;
-const PREVIEW_COL_WIDE = 360;
-const WIDE_BREAKPOINT = 1280;
-
-// Compound key avoids cross-project draft bleed: E{ep}U{n} repeats across projects.
-function draftKey(projectName: string, episode: number, unitId: string): string {
-  return `${projectName}::${episode}::${unitId}`;
-}
-
-function withoutKey(record: Record<string, string>, key: string): Record<string, string> {
-  if (!(key in record)) return record;
-  const next = { ...record };
-  delete next[key];
-  return next;
-}
-
 function toastError(e: unknown, format?: (msg: string) => string): void {
   const msg = errMsg(e);
   useAppStore.getState().pushToast(format ? format(msg) : msg, "error");
@@ -162,12 +156,127 @@ function unitNarrationText(unit: ReferenceVideoUnit | null): string {
   return hasCharacterSpeech ? "" : narration.join("\n");
 }
 
+/**
+ * 选中单元的正文编辑单元。按 unit_id 作 key 挂载：切换单元前由离开拦截询问，
+ * 外部移除时由 RetainedEditUnit 保留可见编辑器，放弃或保存后才跟随真实列表。
+ */
+function UnitPromptEdit({
+  unit,
+  onSave,
+  allowNavigation,
+  children,
+}: {
+  unit: ReferenceVideoUnit;
+  onSave: (unitId: string, prompt: string) => Promise<string>;
+  allowNavigation: (to: string) => boolean;
+  children: (edit: EditUnit<string>) => ReactNode;
+}) {
+  const { t } = useTranslation("dashboard");
+  const unitId = unit.unit_id;
+  const save = useCallback((prompt: string) => onSave(unitId, prompt), [onSave, unitId]);
+  const edit = useEditUnit({
+    source: unit.text,
+    save,
+    allowNavigation,
+    leaveTitle: t("reference_unit_leave_title", { id: itemIdWithinEpisode(unitId) }),
+  });
+  return <>{children(edit)}</>;
+}
+
+/** 自由时长的合法范围（秒），与服务端校验一致。 */
+const FREE_DURATION_MAX = 300;
+
+/**
+ * 自由时长输入：失焦或回车时提交一次，中间输入的数字不落盘。
+ * 尚未提交的值登记到离开拦截；非法值在提交时回到已保存的时长。
+ */
+function FreeDurationInput({
+  unit,
+  disabled,
+  onCommit,
+}: {
+  unit: ReferenceVideoUnit;
+  disabled: boolean;
+  onCommit: (seconds: number) => Promise<boolean>;
+}) {
+  const { t } = useTranslation("dashboard");
+  const [draft, setDraft] = useState<string | null>(null);
+  // 失焦触发的提交在途：离开拦截据此等它落定再判断，避免「放弃修改」放走已发出的提交或「保存」重复提交
+  const [committing, setCommitting] = useState(false);
+  const seconds = Number(draft);
+  const valid = Number.isInteger(seconds) && seconds >= 1 && seconds <= FREE_DURATION_MAX;
+  // 与已保存值相同的显式提交也有意义：它确认了只差时长的重新规划标记
+  const dirty =
+    draft !== null && (!valid || seconds !== unit.duration_seconds || Boolean(unit.needs_replan));
+
+  const discard = useCallback(() => setDraft(null), []);
+  const commit = useCallback(async () => {
+    if (draft === null) return true;
+    if (!dirty || !valid) {
+      setDraft(null);
+      return true;
+    }
+    setCommitting(true);
+    try {
+      const saved = await onCommit(seconds);
+      // 提交期间又改过的值留着，等下一次提交
+      if (saved) setDraft((current) => (current === draft ? null : current));
+      return saved;
+    } finally {
+      setCommitting(false);
+    }
+  }, [draft, dirty, valid, seconds, onCommit]);
+
+  useLeaveGuard({ dirty, saving: committing, save: commit, discard });
+
+  return (
+    <Input
+      type="number"
+      min={1}
+      max={FREE_DURATION_MAX}
+      step={1}
+      aria-label={t("duration_selector_aria")}
+      value={draft ?? String(unit.duration_seconds)}
+      disabled={disabled}
+      onChange={(e) => setDraft(e.currentTarget.value)}
+      onBlur={() => void commit()}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") e.currentTarget.blur();
+      }}
+      className="h-7 w-20"
+    />
+  );
+}
+
+/** 单元头部的图标按钮：可访问名称同时作为悬停提示。 */
+function HeaderIconButton({
+  label,
+  disabled,
+  onClick,
+  children,
+}: {
+  label: string;
+  disabled?: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={<Button variant="ghost" size="icon-sm" aria-label={label} disabled={disabled} onClick={onClick} />}
+      >
+        {children}
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
+  );
+}
+
 export function ReferenceVideoCanvas({
   projectName,
   episode,
-  episodeTitle,
-  onSaveTitle,
-  canEditTitle,
+  view,
+  onViewChange,
   hasScript = true,
   showPreprocess = true,
   freeDuration = false,
@@ -228,11 +337,6 @@ export function ReferenceVideoCanvas({
     }
   }, [projectName, t, voiceLegacyNotice.characterNames]);
 
-  // Drafts persist across unit switches; entry is dropped when text matches server value.
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const [durationDrafts, setDurationDrafts] = useState<Record<string, string>>({});
-  const [saving, setSaving] = useState(false);
-
   // resource（=unit）→ 最新任务行。「最新行胜出」下沉到 store selector：
   // store 不保证 tasks 顺序（SSE 原位 upsert），重试的新行不被旧失败行盖住。
   const tasksByUnit = useLatestTasksByResource(projectName, "reference_video");
@@ -251,12 +355,6 @@ export function ReferenceVideoCanvas({
     () => units.find((u) => u.unit_id === selectedUnitId) ?? null,
     [units, selectedUnitId],
   );
-  const selectedDurationKey = selected
-    ? draftKey(projectName, episode, selected.unit_id)
-    : null;
-  const selectedDurationValue = selectedDurationKey
-    ? (durationDrafts[selectedDurationKey] ?? String(selected?.duration_seconds ?? ""))
-    : "";
 
   // 单元落哪个桶、可选哪些档位，由服务端按此刻可用的参考图逐单元判定（与执行侧
   // ReferenceUnitRequestProjector 同一判据），随单元列表与写入响应到达；画布不按正文里
@@ -284,9 +382,8 @@ export function ReferenceVideoCanvas({
   const ttsBusyUnitIds = useActiveResourceIds("tts", projectName);
 
   // 成片上传、版本恢复与时长保存都不产生任务行，进不了 tasks-store 占用集，故在画布层按 unit 记录。
-  // 存在这里而非 UnitPreviewPanel 内：该面板有窄屏 sub-tab 与宽屏右栏两处挂载点，切换子页
-  // 或跨越 STACK_PREVIEW_BREAKPOINT 都会卸载它（在途请求不会因此取消），且它随选中项切换
-  // 复用，面板内的单个布尔量还会把 A 的占用态串到 B 上。
+  // 存在这里而非 UnitPreviewPanel 内：该面板随选中项切换复用，面板内的单个布尔量会把 A 的
+  // 占用态串到 B 上；没有选中项时它也会卸载，在途请求不会因此取消。
   const uploading = useUnitFlagSet();
   const restoring = useUnitFlagSet();
   const durationSaving = useUnitFlagSet();
@@ -332,26 +429,31 @@ export function ReferenceVideoCanvas({
     return tasksByUnit.get(selected.unit_id)?.error_message ?? null;
   }, [selected, statusMap, tasksByUnit]);
 
-  const dirtyMap = useMemo<Record<string, boolean>>(() => {
-    const map: Record<string, boolean> = {};
-    for (const u of units) {
-      const v = drafts[draftKey(projectName, episode, u.unit_id)];
-      if (v !== undefined && v !== u.text) map[u.unit_id] = true;
-    }
-    return map;
-  }, [units, drafts, projectName, episode]);
+  // 切换选中单元会卸载当前单元的编辑单元：有未保存的正文或时长时先询问
+  const confirmLeave = useConfirmLeave();
+  const selectUnit = useCallback(
+    (unitId: string) => {
+      confirmLeave(() => select(unitId), { saveLabel: t("common:save_and_switch") });
+    },
+    [confirmLeave, select, t],
+  );
 
   // afterUnitId 缺省时追加到末尾；新单元不继承同号旧单元的产物与版本历史。
-  const handleAdd = useCallback(async (afterUnitId?: string) => {
-    try {
-      await addUnit(projectName, episode, {
-        prompt: "",
-        ...(afterUnitId !== undefined ? { after_unit_id: afterUnitId } : {}),
-      });
-    } catch (e) {
-      toastError(e);
-    }
-  }, [addUnit, projectName, episode]);
+  // store 新增后选中新单元，同样先经离开拦截。
+  const handleAdd = useCallback(
+    (afterUnitId?: string) => {
+      confirmLeave(
+        () => {
+          void addUnit(projectName, episode, {
+            prompt: "",
+            ...(afterUnitId !== undefined ? { after_unit_id: afterUnitId } : {}),
+          }).catch((e: unknown) => toastError(e));
+        },
+        { saveLabel: t("common:save_and_switch") },
+      );
+    },
+    [confirmLeave, addUnit, projectName, episode, t],
+  );
 
   // 改序不弹确认；请求在途时丢弃后续操作，避免基于过期顺序计算锚点。
   const [movingUnit, setMovingUnit] = useState(false);
@@ -366,10 +468,6 @@ export function ReferenceVideoCanvas({
       setMovingUnit(false);
     }
   }, [moveUnit, projectName, episode, movingUnit]);
-  const onMove = useCallback(
-    (unitId: string, afterUnitId: string | null) => void handleMove(unitId, afterUnitId),
-    [handleMove],
-  );
 
   // 移除比其他写入多挡一类占用：在跑的配音任务同样指向该单元（与时间线分镜的移除守卫一致）。
   const isUnitRemovalBlocked = useCallback(
@@ -378,15 +476,22 @@ export function ReferenceVideoCanvas({
   );
   const [removeUnitId, setRemoveUnitId] = useState<string | null>(null);
   const [removingUnit, setRemovingUnit] = useState(false);
+  const openRemoveDialog = useCallback(
+    (unitId: string) => {
+      // 渲染期的禁用态未必最新，打开确认前再复核一次占用
+      if (isUnitRemovalBlocked(unitId)) {
+        useAppStore.getState().pushToast(t("reference_generate_busy"), "error");
+        return;
+      }
+      setRemoveUnitId(unitId);
+    },
+    [isUnitRemovalBlocked, t],
+  );
   const handleRemoveUnit = useCallback(async () => {
     if (!removeUnitId || removingUnit || isUnitRemovalBlocked(removeUnitId)) return;
     setRemovingUnit(true);
     try {
       await deleteUnit(projectName, episode, removeUnitId);
-      // 已移除单元的未保存草稿随之作废：否则离开页面告警常驻，新增单元取回同一 id 时还会显示旧草稿。
-      const key = draftKey(projectName, episode, removeUnitId);
-      setDrafts((current) => withoutKey(current, key));
-      setDurationDrafts((current) => withoutKey(current, key));
       setRemoveUnitId(null);
     } catch (e) {
       toastError(e);
@@ -664,7 +769,7 @@ export function ReferenceVideoCanvas({
     void runBatch(targets, confirmed);
   }, [batchAdmission, canEnqueueBatchUnit, runBatch, t]);
 
-  const onAdd = useCallback(() => void handleAdd(), [handleAdd]);
+  const onAdd = useCallback(() => handleAdd(), [handleAdd]);
 
   // 时长与正文分开提交：时长不是文本的一部分，改档位立即落盘，不牵连未保存的正文草稿。
   const handleDurationChange = useCallback(
@@ -691,149 +796,24 @@ export function ReferenceVideoCanvas({
     [patchUnit, projectName, episode, isUnitLocked, setDurationSaving, t],
   );
 
-  const clearDurationDraft = useCallback((key: string, expected: string) => {
-    setDurationDrafts((current) => {
-      if (current[key] !== expected) return current;
-      const next = { ...current };
-      delete next[key];
-      return next;
-    });
-  }, []);
-
-  const handleFreeDurationChange = useCallback(
-    (unitId: string, value: string) => {
-      const key = draftKey(projectName, episode, unitId);
-      setDurationDrafts((current) => ({ ...current, [key]: value }));
-    },
-    [projectName, episode],
-  );
-
-  const commitFreeDuration = useCallback(
-    (unitId: string, rawValue: string) => {
-      const key = draftKey(projectName, episode, unitId);
-      if (!(key in durationDrafts)) return;
-      const seconds = Number(rawValue);
-      const fresh = useReferenceVideoStore
-        .getState()
-        .unitsByEpisode[referenceVideoCacheKey(projectName, episode)]?.find(
-          (unit) => unit.unit_id === unitId,
-        );
-      const confirmsDurationMarker = Boolean(fresh?.needs_replan);
-      if (
-        !Number.isInteger(seconds) ||
-        seconds < 1 ||
-        seconds > 300 ||
-        !fresh ||
-        (fresh.duration_seconds === seconds && !confirmsDurationMarker)
-      ) {
-        clearDurationDraft(key, rawValue);
-        return;
-      }
-      void handleDurationChange(unitId, seconds).then((saved) => {
-        if (saved) clearDurationDraft(key, rawValue);
-      });
-    },
-    [projectName, episode, durationDrafts, handleDurationChange, clearDurationDraft],
-  );
   const onGenerateVoid = useCallback((id: string) => void handleGenerate(id), [handleGenerate]);
 
-  const handlePromptChange = useCallback(
-    (next: string) => {
-      if (!selected) return;
-      const key = draftKey(projectName, episode, selected.unit_id);
-      const baseText = selected.text;
-      setDrafts((d) => {
-        if (next === baseText) {
-          if (!(key in d)) return d;
-          const copy = { ...d };
-          delete copy[key];
-          return copy;
-        }
-        return { ...d, [key]: next };
-      });
+  const handlePromptSave = useCallback(
+    async (unitId: string, prompt: string) => {
+      const saved = await patchUnit(projectName, episode, unitId, { prompt });
+      return saved.text;
     },
-    [selected, projectName, episode],
+    [patchUnit, projectName, episode],
   );
-
-  const currentText = useMemo(() => {
-    if (!selected) return "";
-    return drafts[draftKey(projectName, episode, selected.unit_id)] ?? selected.text;
-  }, [selected, drafts, projectName, episode]);
-
-  const isDirty = !!(selected && dirtyMap[selected.unit_id]);
+  const allowNavigation = useStaysInEpisodeView();
 
   // 编辑器列内的两种视图：写文稿 / 看解析结果。解析预览是只读派生视图，与正文同一份
   // 文本，故共用编辑器列的空间而非再占一栏（右栏留给成片预览）。
   const [editorView, setEditorView] = useState<"script" | "parse">("script");
 
-  const hasAnyDurationDraft = units.some((unit) => {
-    const raw = durationDrafts[draftKey(projectName, episode, unit.unit_id)];
-    if (raw === undefined) return false;
-    const seconds = Number(raw);
-    return (
-      !Number.isInteger(seconds) ||
-      seconds < 1 ||
-      seconds > 300 ||
-      seconds !== unit.duration_seconds ||
-      Boolean(unit.needs_replan)
-    );
-  });
-  const hasAnyDraft = Object.keys(drafts).length > 0 || hasAnyDurationDraft;
+  const videoGap = useBatchGap(projectName, episode, "videos", "reference_video");
 
-  // 草稿已落盘 → 丢弃本地草稿。若这期间用户又敲了字（草稿值已变），保留新草稿不动，
-  // 否则落盘响应回来时会把用户刚输入的内容抹掉。
-  const clearFlushedDraft = useCallback((key: string, flushed: string) => {
-    setDrafts((d) => {
-      if (d[key] !== flushed) return d;
-      const copy = { ...d };
-      delete copy[key];
-      return copy;
-    });
-  }, []);
-
-  const handleSave = useCallback(async () => {
-    if (!selected) return;
-    const unitId = selected.unit_id;
-    const key = draftKey(projectName, episode, unitId);
-    const draftText = drafts[key];
-    if (draftText === undefined || draftText === selected.text) return;
-    setSaving(true);
-    try {
-      await patchUnit(projectName, episode, unitId, { prompt: draftText });
-      clearFlushedDraft(key, draftText);
-    } catch (e) {
-      toastError(e);
-    } finally {
-      setSaving(false);
-    }
-  }, [selected, drafts, patchUnit, projectName, episode, clearFlushedDraft]);
-
-  // Reset tab to units on project/episode change (render-time derived-state pattern).
-  // 初始值按 hasScript 走 GridImageToVideoCanvas 同款判定：prompt_authoring 剧本未生成时（仅 segmented）
-  // units 面板无脚本可读、请求会 404，应先落到内容确认。
-  const [tab, setTab] = useState<"units" | "preproc">(
-    hasScript || !showPreprocess ? "units" : "preproc",
-  );
-  const [lastEpisode, setLastEpisode] = useState(episode);
-  const [lastProject, setLastProject] = useState(projectName);
-  if (lastEpisode !== episode || lastProject !== projectName) {
-    setLastEpisode(episode);
-    setLastProject(projectName);
-    setTab(hasScript || !showPreprocess ? "units" : "preproc");
-  }
-
-  useEffect(() => {
-    // 剧本生成完成后（hasScript 由 false 变 true）自动切到 units，同一 episode 内组件不 remount。
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- 镜像 GridImageToVideoCanvas 同款效果
-    if (hasScript || !showPreprocess) setTab("units");
-  }, [hasScript, showPreprocess]);
-
-  useEpisodeSurfaceRequest(projectName, episode, "script_plan", () => {
-    if (showPreprocess) setTab("preproc");
-  });
-  useEpisodeSurfaceRequest(projectName, episode, "prompt_authoring_draft", () => setTab("units"));
-
-  // 通知回跳：收到 reference_unit scroll target 时切到 units tab 并选中对应 unit
+  // 通知回跳：收到 reference_unit scroll target 时切到视频单元视图并选中对应 unit
   // （镜像 ShotSplitView 的选择式回跳）。units 异步加载，靠依赖变化重试到命中或过期。
   const scrollTarget = useAppStore((s) => s.scrollTarget);
   const clearScrollTarget = useAppStore((s) => s.clearScrollTarget);
@@ -841,14 +821,19 @@ export function ReferenceVideoCanvas({
     if (scrollTarget?.type !== "reference_unit") return;
     const requestId = scrollTarget.request_id;
     if (units.some((u) => u.unit_id === scrollTarget.id)) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- 订阅通知 store，触发后切 tab + 选中
-      setTab("units");
-      select(scrollTarget.id);
+      const unitId = scrollTarget.id;
       // 应用内链接要求打开该单元的预览时，窄屏下把预览子页签切到前台。
       const start = useAppStore.getState().playbackStart;
-      if (start?.resource_type === "reference_videos" && start.resource_id === scrollTarget.id) {
-        setStackTab("preview");
-      }
+      const openPreview = start?.resource_type === "reference_videos" && start.resource_id === unitId;
+      // 切视图与选中合成一次离开拦截：分两次请求时，拦截只保留后一次，放行后会停在原视图
+      const focusUnit = () => {
+        onViewChange("board", { replace: true });
+        select(unitId);
+        if (openPreview) setStackTab("preview");
+      };
+      // 已在视频单元视图且就是当前单元：不卸载任何编辑单元，不必询问
+      if (view === "board" && unitId === selectedUnitId) focusUnit();
+      else confirmLeave(focusUnit, { saveLabel: t("common:save_and_switch") });
       clearScrollTarget(requestId);
       return;
     }
@@ -865,57 +850,9 @@ export function ReferenceVideoCanvas({
     }
     const timer = setTimeout(() => clearScrollTarget(requestId), remaining);
     return () => clearTimeout(timer);
-  }, [scrollTarget, units, loading, select, clearScrollTarget]);
+  }, [scrollTarget, units, loading, view, selectedUnitId, select, clearScrollTarget, onViewChange, confirmLeave, t]);
 
-  const preprocStatus: "loading" | "error" | "empty" | "ready" = loading
-    ? "loading"
-    : error
-      ? "error"
-      : units.length === 0
-        ? "empty"
-        : "ready";
-  const preprocDot: Record<typeof preprocStatus, string> = {
-    loading: "bg-gray-500",
-    error: "bg-red-500",
-    empty: "bg-gray-500",
-    ready: "bg-emerald-500",
-  };
-
-  useEffect(() => {
-    if (!hasAnyDraft) return;
-    const handler = (e: BeforeUnloadEvent) => {
-      e.preventDefault();
-      e.returnValue = "";
-    };
-    window.addEventListener("beforeunload", handler);
-    return () => window.removeEventListener("beforeunload", handler);
-  }, [hasAnyDraft]);
-
-  const workbenchRef = useRef<HTMLDivElement>(null);
-  const [containerWidth, setContainerWidth] = useState(1200);
-  useLayoutEffect(() => {
-    if (!workbenchRef.current) return;
-    const el = workbenchRef.current;
-    const ro = new ResizeObserver((entries) => {
-      for (const e of entries) {
-        const w = e.contentRect.width;
-        // jsdom 下 contentRect.width 恒为 0；同像素值不重复 setState 避免亚像素抖动。
-        if (w > 0) setContainerWidth((prev) => (prev === w ? prev : w));
-      }
-    });
-    ro.observe(el);
-    const initial = el.getBoundingClientRect().width;
-    if (initial > 0) setContainerWidth(initial);
-    return () => ro.disconnect();
-  }, []);
-  const listMode: "rail" | "full" = containerWidth < LIST_RAIL_BREAKPOINT ? "rail" : "full";
-  const stackPreview = containerWidth < STACK_PREVIEW_BREAKPOINT;
-  const listColW = listMode === "rail" ? 56 : 320;
-  const previewColW = containerWidth < WIDE_BREAKPOINT ? PREVIEW_COL_NARROW : PREVIEW_COL_WIDE;
-  const gridCols = stackPreview
-    ? `${listColW}px minmax(0, 1fr)`
-    : `${listColW}px minmax(0, 1fr) ${previewColW}px`;
-  const [listFlyoutOpen, setListFlyoutOpen] = useState(false);
+  const [listSheetOpen, setListSheetOpen] = useState(false);
 
   const segCost = useCostStore((s) =>
     selected ? s._segmentIndex.get(selected.unit_id) : undefined,
@@ -928,12 +865,12 @@ export function ReferenceVideoCanvas({
   const selectedIndex = selected ? units.findIndex((u) => u.unit_id === selected.unit_id) : -1;
   const goPrev = useCallback(() => {
     if (selectedIndex <= 0) return;
-    select(units[selectedIndex - 1].unit_id);
-  }, [select, units, selectedIndex]);
+    selectUnit(units[selectedIndex - 1].unit_id);
+  }, [selectUnit, units, selectedIndex]);
   const goNext = useCallback(() => {
     if (selectedIndex < 0 || selectedIndex >= units.length - 1) return;
-    select(units[selectedIndex + 1].unit_id);
-  }, [select, units, selectedIndex]);
+    selectUnit(units[selectedIndex + 1].unit_id);
+  }, [selectUnit, units, selectedIndex]);
   const moveStep = useCallback(
     (direction: "earlier" | "later") => {
       const afterId = stepAnchor(units.map((u) => u.unit_id), selectedIndex, direction);
@@ -942,131 +879,318 @@ export function ReferenceVideoCanvas({
     [handleMove, units, selectedIndex],
   );
 
-  return (
-    <div className="flex h-full min-h-0 flex-col">
-      <EpisodeHeader
-        episode={episode}
-        title={episodeTitle ?? ""}
-        units={units}
-        onSaveTitle={onSaveTitle}
-        canEditTitle={canEditTitle}
-      />
+  const unitHeaderLocked = selected ? isUnitLocked(selected.unit_id) : false;
+  const notices =
+    view === "board" &&
+    (voiceLegacyNotice.count > 0 ||
+      promptDraft?.editable_by === "agent" ||
+      (hasScript && !showPreprocess) ||
+      Boolean(error));
 
-      {/* Tabs + request-local generation controls */}
-      <div className="flex items-center gap-0.5 border-b border-[var(--color-hairline)] bg-[oklch(0.19_0.012_250_/_0.5)] px-5">
-        <div role="tablist" aria-label={t("reference_main_tab_aria")} className="flex items-center gap-0.5">
-          {showPreprocess && <button
-            type="button"
-            role="tab"
-            aria-selected={tab === "preproc"}
-            onClick={() => setTab("preproc")}
-            className={`focus-ring relative inline-flex items-center gap-1.5 px-3.5 py-2.5 text-[12.5px] font-medium ${
-              tab === "preproc" ? "text-[var(--color-text)]" : "text-[var(--color-text-3)]"
-            }`}
-          >
-            <span>{t("reference_tab_script_plan")}</span>
-            {preprocStatus === "loading" ? (
-              <Loader2 className="h-3 w-3 animate-spin text-[var(--color-text-4)]" aria-hidden="true" />
-            ) : (
-              <span
-                aria-hidden="true"
-                className={`h-1.5 w-1.5 rounded-full ${preprocDot[preprocStatus]}`}
-              />
-            )}
-            {tab === "preproc" && (
-              <span
-                aria-hidden="true"
-                className="absolute -bottom-px left-2.5 right-2.5 h-0.5 rounded bg-[var(--color-accent)]"
-              />
-            )}
-          </button>}
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tab === "units"}
-            onClick={() => setTab("units")}
-            className={`focus-ring relative px-3.5 py-2.5 text-[12.5px] font-medium ${
-              tab === "units" ? "text-[var(--color-text)]" : "text-[var(--color-text-3)]"
-            }`}
-          >
-            {t("reference_tab_units")}
-            {tab === "units" && (
-              <span
-                aria-hidden="true"
-                className="absolute -bottom-px left-2.5 right-2.5 h-0.5 rounded bg-[var(--color-accent)]"
-              />
-            )}
-          </button>
-        </div>
-        <span className="flex-1" />
-        {tab === "units" && (
-          <>
-            {/* 没有预处理的参考画布只用于广告/短片：有正式脚本时可整份重新生成。 */}
-            {hasScript && !showPreprocess && (
-              <AdScriptButton
-                projectName={projectName}
-                episode={episode}
-                regenerate
-                className="focus-ring rounded-md border border-[var(--color-hairline)] bg-[oklch(0.22_0.011_265_/_0.5)] px-2.5 py-1 text-[11.5px] text-[var(--color-text-2)] transition-colors hover:bg-[oklch(0.26_0.013_265_/_0.7)] hover:text-[var(--color-text)]"
-              />
-            )}
-            {hasScript && (
-              <PromptAuthoringButton
-                projectName={projectName}
-                episode={episode}
-                scope={selectedUnitId ? "current" : "pending"}
-                currentEntryId={selectedUnitId}
-                className="focus-ring rounded-md border border-[var(--color-hairline)] bg-[oklch(0.22_0.011_265_/_0.5)] px-2.5 py-1 text-[11.5px] text-[var(--color-text-2)] transition-colors hover:bg-[oklch(0.26_0.013_265_/_0.7)] hover:text-[var(--color-text)]"
-              />
-            )}
-            <button
-              type="button"
-              onClick={() => void handleBatchGenerate()}
-              disabled={batchTargets.length === 0}
-              className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-[var(--color-hairline)] bg-[oklch(0.22_0.011_265_/_0.5)] px-2.5 py-1 text-[11.5px] text-[var(--color-text-2)] transition-colors hover:bg-[oklch(0.26_0.013_265_/_0.7)] hover:text-[var(--color-text)] disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>{t("reference_batch_generate")}</span>
-            </button>
-          </>
-        )}
-      </div>
-
-      {tab === "units" && voiceLegacyNotice.count > 0 && (
-        <VoiceLegacyBanner
-          message={t("voice_legacy_banner_message", { count: voiceLegacyNotice.count })}
-          dismissLabel={t("voice_legacy_banner_dismiss")}
-          onDismiss={() => void handleDismissVoiceLegacyNotice()}
+  const renderDurationControl = (unit: ReferenceVideoUnit) => {
+    if (freeDuration && !selectedDurationEndpointFixed) {
+      return (
+        <FreeDurationInput
+          key={unit.unit_id}
+          unit={unit}
+          disabled={unitHeaderLocked}
+          onCommit={(seconds) => handleDurationChange(unit.unit_id, seconds)}
         />
-      )}
-
-      {tab === "units" && promptDraft?.editable_by === "agent" && (
-        <div className="border-b border-[var(--color-hairline-soft)] px-5 py-2">
-          <PromptAuthoringDraftPanel
-            key={`${projectName}:${episode}`}
-            projectName={projectName}
-            episode={episode}
-            view={promptDraft}
-            onSettled={refreshPromptDraft}
-          />
-        </div>
-      )}
-
-      {tab === "units" && hasScript && !showPreprocess && (
-        <AdScriptProgress projectName={projectName} episode={episode} noScript={false} className="mx-5 my-2" />
-      )}
-
-      {error && tab === "units" && (
-        <p
-          role="alert"
-          className="border-b border-[var(--color-hairline-soft)] bg-red-500/10 px-5 py-2 text-xs text-red-400"
+      );
+    }
+    if (selectedTierProblem) {
+      return <span className="font-medium text-warn">{selectedTierProblem.label}</span>;
+    }
+    if (!selectedDurationEndpointFixed && effectiveDurationOptions && effectiveDurationOptions.length > 0) {
+      // 已保存的越界值（换模型后档位收窄）留一项，避免下拉把它静默改写成别的秒数
+      const options = effectiveDurationOptions.includes(unit.duration_seconds)
+        ? effectiveDurationOptions
+        : [...effectiveDurationOptions, unit.duration_seconds].sort((a, b) => a - b);
+      return (
+        <Select
+          value={unit.duration_seconds}
+          disabled={unitHeaderLocked}
+          onValueChange={(seconds: number | null) => {
+            if (seconds !== null) void handleDurationChange(unit.unit_id, seconds);
+          }}
         >
-          {error}
-        </p>
+          <SelectTrigger size="sm" aria-label={t("duration_selector_aria")}>
+            <SelectValue>{(seconds: number) => t("duration_seconds_value_text", { value: seconds })}</SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            {options.map((seconds) => (
+              <SelectItem key={seconds} value={seconds}>
+                {t("duration_seconds_value_text", { value: seconds })}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      );
+    }
+    return (
+      <span className="font-mono tabular-nums">
+        {t("duration_seconds_value_text", { value: unit.duration_seconds })}
+        <span className="sr-only">
+          {t(selectedDurationEndpointFixed ? "duration_not_driven_notice" : "duration_no_options")}
+        </span>
+      </span>
+    );
+  };
+
+  const renderPreview = (edit: EditUnit<string> | null) => (
+    <UnitPreviewPanel
+      unit={selected}
+      projectName={projectName}
+      status={selected ? statusMap[selected.unit_id] : undefined}
+      errorMessage={failureMessage}
+      busy={selectedBusy}
+      estimatedCost={estimatedCost}
+      actualCost={actualCost}
+      narrationText={selectedNarrationText}
+      narrationGenerating={selected ? ttsBusyUnitIds.has(selected.unit_id) : false}
+      narrationEstimatedCost={narrationEstimatedCost}
+      onGenerateNarration={onGenerateNarration && edit ? (id) => void edit.saveAndGenerate(() => onGenerateNarration(id)) : onGenerateNarration}
+      // 正文有未保存修改时先保存再生成，生成用的是服务端上的正文
+      onGenerate={edit ? (id) => void edit.saveAndGenerate(() => handleGenerate(id)) : onGenerateVoid}
+      saveFirst={edit?.dirty}
+      saving={edit?.status === "saving"}
+      generationBlocked={Boolean(selected?.needs_replan)}
+      onUploadVideo={handleUploadVideo}
+      uploadingVideo={selected ? uploading.ids.has(selected.unit_id) : false}
+      restoring={selected ? restoring.ids.has(selected.unit_id) : false}
+      onRestoringChange={handleRestoringChange}
+      checkBusy={isUnitLocked}
+      onRestored={handleUnitsRefresh}
+    />
+  );
+
+  const renderSelectedUnit = (unit: ReferenceVideoUnit, edit: EditUnit<string>) => {
+    const status = statusMap[unit.unit_id];
+    return (
+      <>
+        {/* 中栏上方：单元头部、单元提示与窄屏下的编辑 / 预览切换 */}
+        <div className="col-start-2 row-start-1 flex min-w-0 flex-col border-b border-border">
+          <div className="flex flex-wrap items-center gap-2 px-4 py-2">
+            <span
+              translate="no"
+              className="rounded-sm bg-primary px-2 py-0.5 font-mono text-xs font-semibold text-primary-foreground"
+            >
+              {itemIdWithinEpisode(unit.unit_id)}
+            </span>
+            <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Clock aria-hidden className="size-3.5" />
+              {renderDurationControl(unit)}
+            </span>
+            {selectedTierProblem && (
+              <span role="alert" className="text-xs text-subtle-foreground">
+                {selectedTierProblem.hint}
+              </span>
+            )}
+            <span className="flex-1" />
+            {selectedIndex >= 0 && (
+              <span className="font-mono text-xs tabular-nums text-muted-foreground">
+                {selectedIndex + 1} / {units.length}
+              </span>
+            )}
+            <div className="flex items-center">
+              <HeaderIconButton
+                label={t("reference_unit_move_earlier")}
+                disabled={movingUnit || selectedIndex <= 0}
+                onClick={() => moveStep("earlier")}
+              >
+                <ChevronUp aria-hidden />
+              </HeaderIconButton>
+              <HeaderIconButton
+                label={t("reference_unit_move_later")}
+                disabled={movingUnit || selectedIndex < 0 || selectedIndex >= units.length - 1}
+                onClick={() => moveStep("later")}
+              >
+                <ChevronDown aria-hidden />
+              </HeaderIconButton>
+              <HeaderIconButton label={t("reference_unit_prev")} disabled={selectedIndex <= 0} onClick={goPrev}>
+                <ChevronLeft aria-hidden />
+              </HeaderIconButton>
+              <HeaderIconButton
+                label={t("reference_unit_next")}
+                disabled={selectedIndex < 0 || selectedIndex >= units.length - 1}
+                onClick={goNext}
+              >
+                <ChevronRight aria-hidden />
+              </HeaderIconButton>
+              <HeaderIconButton label={t("reference_unit_insert_after")} onClick={() => handleAdd(unit.unit_id)}>
+                <Plus aria-hidden />
+              </HeaderIconButton>
+              <HeaderIconButton
+                label={t("reference_unit_remove")}
+                disabled={isUnitRemovalBlocked(unit.unit_id)}
+                onClick={() => openRemoveDialog(unit.unit_id)}
+              >
+                <Trash2 aria-hidden />
+              </HeaderIconButton>
+            </div>
+          </div>
+
+          {unit.needs_replan && (
+            <p
+              role="alert"
+              className="flex items-start gap-2 border-t border-warn/30 bg-warn/10 px-4 py-2 text-xs text-subtle-foreground"
+            >
+              <AlertTriangle aria-hidden className="mt-px size-3.5 shrink-0 text-warn" />
+              {t("reference_needs_replan")}
+            </p>
+          )}
+
+          {selectedSplit && (
+            <ReferenceSplitAlert
+              capability={selectedSplit}
+              className="border-t border-destructive/30 bg-destructive/10 px-4 py-2 text-xs text-destructive"
+            />
+          )}
+
+          <Tabs
+            value={stackTab}
+            onValueChange={(next: "editor" | "preview") => setStackTab(next)}
+            className="mx-4 mb-2 @4xl/canvas:hidden"
+          >
+            <TabsList aria-label={t("reference_tab_aria")}>
+              <TabsTrigger value="editor">
+                {t("reference_tab_editor")}
+                {edit.dirty && (
+                  <>
+                    <span aria-hidden className="size-1.5 rounded-full bg-warn" />
+                    <span className="sr-only">{t("reference_tab_dirty_aria")}</span>
+                  </>
+                )}
+              </TabsTrigger>
+              <TabsTrigger value="preview">
+                {t("reference_tab_preview")}
+                {status && status !== "pending" && (
+                  <span aria-hidden className={`size-1.5 rounded-full ${STATUS_CONF[status].dotClass}`} />
+                )}
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
+        </div>
+
+        {/* 中栏：文稿编辑器与解析预览。窄屏下与预览栏占同一格，由上方的切换决定显示哪一个 */}
+        <div
+          data-inactive={stackTab !== "editor" || undefined}
+          className="col-start-2 row-start-2 flex min-h-0 min-w-0 flex-col data-inactive:hidden @4xl/canvas:data-inactive:flex"
+        >
+          <div className="relative flex min-h-0 flex-1 flex-col overflow-y-auto p-3">
+          <Tabs
+            value={editorView}
+            onValueChange={(next: "script" | "parse") => setEditorView(next)}
+            className="flex-1"
+          >
+            <TabsList aria-label={t("reference_editor_view_aria")}>
+              <TabsTrigger value="script">{t("reference_editor_view_script")}</TabsTrigger>
+              <TabsTrigger value="parse">{t("reference_editor_view_parse")}</TabsTrigger>
+            </TabsList>
+            <TabsContent value="script" className="flex flex-col">
+              <ReferenceVideoCard
+                unit={unit}
+                projectName={projectName}
+                episode={episode}
+                value={edit.value}
+                onChange={edit.setValue}
+                beforePreview={edit.save}
+                dirty={edit.dirty}
+                saving={edit.status === "saving"}
+              />
+            </TabsContent>
+            <TabsContent value="parse">
+              <ScriptPreviewPanel
+                projectName={projectName}
+                episode={episode}
+                text={edit.value}
+                lookup={mentionLookup}
+              />
+            </TabsContent>
+          </Tabs>
+          </div>
+          <UnsavedChangesBar unit={edit} className="mx-3 mb-3 shrink-0" />
+        </div>
+
+        {/* 右栏：成片预览。窄屏下叠进中栏，由编辑 / 预览切换显示 */}
+        <div
+          data-inactive={stackTab !== "preview" || undefined}
+          className="col-start-2 row-start-2 flex min-h-0 min-w-0 flex-col border-border data-inactive:hidden @4xl/canvas:col-start-3 @4xl/canvas:row-start-1 @4xl/canvas:row-end-3 @4xl/canvas:border-l @4xl/canvas:data-inactive:flex"
+        >
+          {renderPreview(edit)}
+        </div>
+      </>
+    );
+  };
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      {view === "board" && (
+        <EpisodeHeaderActions>
+          {/* 没有预处理的参考画布只用于广告/短片：有正式脚本时可整份重新生成。 */}
+          {hasScript && !showPreprocess && (
+            <AdScriptButton projectName={projectName} episode={episode} regenerate />
+          )}
+          {hasScript && (
+            <PromptAuthoringButton
+              projectName={projectName}
+              episode={episode}
+              scope={selectedUnitId ? "current" : "pending"}
+              currentEntryId={selectedUnitId}
+            />
+          )}
+          <BatchFillButton
+            kind="videos"
+            count={videoGap}
+            units
+            disabled={batchTargets.length === 0}
+            onClick={() => void handleBatchGenerate()}
+          />
+        </EpisodeHeaderActions>
       )}
 
-      {tab === "preproc" ? (
-        <div className="min-h-0 flex-1 overflow-auto bg-[oklch(0.18_0.011_250_/_0.25)]">
+      {/* 工作台上方的提示：限高并自带滚动，提示再多也不把编辑器与预览挤到高度下限以下 */}
+      {notices && (
+        <section
+          aria-label={t("reference_notices_aria")}
+          // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- 提示超出限高时只能在这里滚动，键盘须能聚焦
+          tabIndex={0}
+          className="focus-ring relative max-h-[30dvh] shrink-0 overflow-y-auto border-b border-border"
+        >
+          {voiceLegacyNotice.count > 0 && (
+            <VoiceLegacyBanner
+              message={t("voice_legacy_banner_message", { count: voiceLegacyNotice.count })}
+              dismissLabel={t("voice_legacy_banner_dismiss")}
+              onDismiss={() => void handleDismissVoiceLegacyNotice()}
+            />
+          )}
+
+          {promptDraft?.editable_by === "agent" && (
+            <div className="px-5 py-2">
+              <PromptAuthoringDraftPanel
+                key={`${projectName}:${episode}`}
+                projectName={projectName}
+                episode={episode}
+                view={promptDraft}
+                onSettled={refreshPromptDraft}
+              />
+            </div>
+          )}
+
+          {hasScript && !showPreprocess && (
+            <AdScriptProgress projectName={projectName} episode={episode} noScript={false} className="mx-5 my-2" />
+          )}
+
+          {error && (
+            <p role="alert" className="bg-destructive/10 px-5 py-2 text-xs text-destructive">
+              {error}
+            </p>
+          )}
+        </section>
+      )}
+
+      <RetainedEditUnit identity={promptDraft?.editable_by === "user" ? "draft" : "workbench"} message={t("reference_prompt_draft_replaced")} value={view === "plan" ? (
+        <div className="relative min-h-0 flex-1 overflow-y-auto">
           <div className="mx-auto w-full max-w-3xl px-6 py-5">
             <ReferenceScriptPlanPreviewPanel
               key={`${projectName}:${episode}`}
@@ -1075,12 +1199,12 @@ export function ReferenceVideoCanvas({
               lookup={mentionLookup}
               videoModelUnresolved={videoModelUnresolved}
               planningDurations={planDurationOptions}
-              onOpenTimeline={() => setTab("units")}
+              onOpenTimeline={() => onViewChange("board")}
             />
           </div>
         </div>
       ) : promptDraft?.editable_by === "user" ? (
-        <div className="min-h-0 flex-1 overflow-auto bg-[oklch(0.18_0.011_250_/_0.25)]">
+        <div className="relative min-h-0 flex-1 overflow-y-auto">
           <div className="mx-auto w-full max-w-3xl px-6 py-5">
             <PromptAuthoringDraftPanel
               key={`${projectName}:${episode}`}
@@ -1092,489 +1216,127 @@ export function ReferenceVideoCanvas({
           </div>
         </div>
       ) : (
-        <div
-          ref={workbenchRef}
-          className="relative min-h-0 flex-1 overflow-hidden bg-[oklch(0.18_0.011_250_/_0.25)]"
-        >
-          <div className="grid h-full min-h-0" style={{ gridTemplateColumns: gridCols }}>
-            {/* 左：UnitList / UnitRail */}
-            {listMode === "full" ? (
-              <UnitList
-                units={units}
-                selectedId={selectedUnitId}
-                onSelect={select}
-                onAdd={onAdd}
-                onMove={movingUnit ? undefined : onMove}
-                dirtyMap={dirtyMap}
-                statusMap={statusMap}
-              />
-            ) : (
-              <UnitRail
-                units={units}
-                selectedId={selectedUnitId}
-                onSelect={select}
-                onExpand={() => setListFlyoutOpen(true)}
-                dirtyMap={dirtyMap}
-                statusMap={statusMap}
-              />
-            )}
-
-            {/* 中：UnitHeader + Editor / Preview（stackPreview 时叠 sub-tab） */}
-            <div className="flex min-h-0 flex-col overflow-hidden bg-[radial-gradient(ellipse_at_top,oklch(0.20_0.012_270_/_0.35),oklch(0.17_0.010_265_/_0.2))]">
-              {selected ? (
-                <>
-                  <div className="flex flex-wrap items-center gap-2 border-b border-[var(--color-hairline-soft)] px-4 py-2.5">
-                    <span
-                      translate="no"
-                      className="rounded px-2.5 py-1 font-mono text-xs font-bold tracking-wider text-[oklch(0.14_0_0)] [background:linear-gradient(180deg,var(--color-accent-2),var(--color-accent))] shadow-[inset_0_1px_0_oklch(1_0_0_/_0.3),0_2px_6px_-2px_var(--color-accent-glow)]"
-                    >
-                      {itemIdWithinEpisode(selected.unit_id)}
-                    </span>
-                    <span className="inline-flex items-center gap-1 rounded border border-[var(--color-hairline-soft)] bg-[oklch(0.22_0.011_265_/_0.6)] px-2 py-0.5 text-[11.5px] text-[var(--color-text-2)]">
-                      <Clock className="h-3 w-3" aria-hidden="true" />
-                      {freeDuration && !selectedDurationEndpointFixed ? (
-                        <input
-                          type="number"
-                          min={1}
-                          max={300}
-                          step={1}
-                          aria-label={t("duration_selector_aria")}
-                          value={selectedDurationValue}
-                          disabled={isUnitLocked(selected.unit_id)}
-                          onChange={(e) =>
-                            handleFreeDurationChange(selected.unit_id, e.currentTarget.value)
-                          }
-                          onBlur={(e) =>
-                            commitFreeDuration(selected.unit_id, e.currentTarget.value)
-                          }
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") e.currentTarget.blur();
-                          }}
-                          className="focus-ring w-14 bg-transparent font-mono tabular-nums text-[var(--color-text-2)] disabled:cursor-not-allowed disabled:opacity-60"
-                        />
-                      ) : selectedTierProblem ? (
-                        <span className="text-amber-300" title={selectedTierProblem.hint}>
-                          {selectedTierProblem.label}
-                        </span>
-                      ) : !selectedDurationEndpointFixed && effectiveDurationOptions && effectiveDurationOptions.length > 0 ? (
-                        <select
-                          aria-label={t("duration_selector_aria")}
-                          value={selected.duration_seconds}
-                          disabled={isUnitLocked(selected.unit_id)}
-                          title={
-                            isUnitLocked(selected.unit_id) ? t("duration_locked_generating") : undefined
-                          }
-                          onChange={(e) =>
-                            void handleDurationChange(selected.unit_id, Number(e.target.value))
-                          }
-                          className="focus-ring cursor-pointer bg-transparent font-mono tabular-nums text-[var(--color-text-2)] disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          {/* 已保存的越界值（换模型后档位收窄）留一项，避免下拉把它静默改写成别的秒数 */}
-                          {(effectiveDurationOptions.includes(selected.duration_seconds)
-                            ? effectiveDurationOptions
-                            : [...effectiveDurationOptions, selected.duration_seconds].sort(
-                                (a, b) => a - b,
-                              )
-                          ).map((seconds) => (
-                            <option key={seconds} value={seconds}>
-                              {t("duration_seconds_value_text", { value: seconds })}
-                            </option>
-                          ))}
-                        </select>
-                      ) : (
-                        <span
-                          className="font-mono tabular-nums"
-                          title={t(selectedDurationEndpointFixed ? "duration_not_driven_notice" : "duration_no_options")}
-                        >
-                          {selected.duration_seconds}s
-                        </span>
-                      )}
-                    </span>
-                    {selectedTierProblem && (
-                      <span role="alert" className="text-[11px] text-amber-300">
-                        {selectedTierProblem.hint}
-                      </span>
-                    )}
-                    <span className="flex-1" />
-                    {selectedIndex >= 0 && (
-                      <span className="font-mono text-[10.5px] tabular-nums text-[var(--color-text-4)]">
-                        {selectedIndex + 1} / {units.length}
-                      </span>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => moveStep("earlier")}
-                      disabled={movingUnit || selectedIndex <= 0}
-                      aria-label={t("reference_unit_move_earlier")}
-                      title={movingUnit ? t("shot_move_pending") : t("reference_unit_move_earlier")}
-                      className="focus-ring inline-grid h-6 w-6 place-items-center rounded border border-[var(--color-hairline)] bg-[oklch(0.22_0.011_265_/_0.5)] text-[var(--color-text-2)] hover:bg-[oklch(0.26_0.013_265_/_0.7)] disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => moveStep("later")}
-                      disabled={movingUnit || selectedIndex < 0 || selectedIndex >= units.length - 1}
-                      aria-label={t("reference_unit_move_later")}
-                      title={movingUnit ? t("shot_move_pending") : t("reference_unit_move_later")}
-                      className="focus-ring inline-grid h-6 w-6 place-items-center rounded border border-[var(--color-hairline)] bg-[oklch(0.22_0.011_265_/_0.5)] text-[var(--color-text-2)] hover:bg-[oklch(0.26_0.013_265_/_0.7)] disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={goPrev}
-                      disabled={selectedIndex <= 0}
-                      aria-label={t("reference_unit_prev")}
-                      className="focus-ring inline-grid h-6 w-6 place-items-center rounded border border-[var(--color-hairline)] bg-[oklch(0.22_0.011_265_/_0.5)] text-[var(--color-text-2)] hover:bg-[oklch(0.26_0.013_265_/_0.7)] disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      <ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={goNext}
-                      disabled={selectedIndex < 0 || selectedIndex >= units.length - 1}
-                      aria-label={t("reference_unit_next")}
-                      className="focus-ring inline-grid h-6 w-6 place-items-center rounded border border-[var(--color-hairline)] bg-[oklch(0.22_0.011_265_/_0.5)] text-[var(--color-text-2)] hover:bg-[oklch(0.26_0.013_265_/_0.7)] disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      <ChevronRight className="h-3.5 w-3.5" aria-hidden="true" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void handleAdd(selected.unit_id)}
-                      aria-label={t("reference_unit_insert_after")}
-                      title={t("reference_unit_insert_after")}
-                      className="focus-ring inline-grid h-6 w-6 place-items-center rounded border border-[var(--color-hairline)] bg-[oklch(0.22_0.011_265_/_0.5)] text-[var(--color-text-2)] hover:bg-[oklch(0.26_0.013_265_/_0.7)] disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setRemoveUnitId(selected.unit_id)}
-                      disabled={isUnitRemovalBlocked(selected.unit_id)}
-                      aria-label={t("reference_unit_remove")}
-                      title={t("reference_unit_remove")}
-                      className="focus-ring inline-grid h-6 w-6 place-items-center rounded border border-[var(--color-hairline)] bg-[oklch(0.22_0.011_265_/_0.5)] text-[var(--color-text-2)] hover:bg-[oklch(0.26_0.013_265_/_0.7)] disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
-                    </button>
-                  </div>
-
-                  {selected.needs_replan && (
-                    <p role="alert" className="border-b border-amber-500/30 bg-amber-500/10 px-4 py-2 text-xs text-amber-300">
-                      {t("reference_needs_replan")}
-                    </p>
-                  )}
-
-                  {selectedSplit && (
-                    <ReferenceSplitAlert
-                      capability={selectedSplit}
-                      className="border-b border-red-500/30 bg-red-500/10 px-4 py-2 text-xs text-red-300"
-                    />
-                  )}
-
-                  {stackPreview && (
-                    <div
-                      role="tablist"
-                      aria-label={t("reference_tab_aria")}
-                      className="flex items-center gap-0 border-b border-[var(--color-hairline)] bg-[oklch(0.19_0.012_250_/_0.4)] px-5"
-                    >
-                      <button
-                        type="button"
-                        role="tab"
-                        aria-selected={stackTab === "editor"}
-                        onClick={() => setStackTab("editor")}
-                        className={`focus-ring relative inline-flex items-center gap-1.5 px-3.5 py-2.5 text-[12.5px] font-medium ${
-                          stackTab === "editor"
-                            ? "text-[var(--color-text)]"
-                            : "text-[var(--color-text-3)]"
-                        }`}
-                      >
-                        <Scissors className="h-3 w-3" aria-hidden="true" />
-                        <span>{t("reference_tab_editor")}</span>
-                        {isDirty && (
-                          <span
-                            aria-label={t("reference_tab_dirty_aria")}
-                            className="h-1.5 w-1.5 rounded-full bg-amber-400"
-                          />
-                        )}
-                        {stackTab === "editor" && (
-                          <span
-                            aria-hidden="true"
-                            className="absolute -bottom-px left-2.5 right-2.5 h-0.5 rounded bg-[var(--color-accent)]"
-                          />
-                        )}
-                      </button>
-                      <button
-                        type="button"
-                        role="tab"
-                        aria-selected={stackTab === "preview"}
-                        onClick={() => setStackTab("preview")}
-                        className={`focus-ring relative inline-flex items-center gap-1.5 px-3.5 py-2.5 text-[12.5px] font-medium ${
-                          stackTab === "preview"
-                            ? "text-[var(--color-text)]"
-                            : "text-[var(--color-text-3)]"
-                        }`}
-                      >
-                        <span>{t("reference_tab_preview")}</span>
-                        {statusMap[selected.unit_id] === "running" && (
-                          <span className="h-1.5 w-1.5 rounded-full bg-amber-400 motion-safe:animate-pulse" />
-                        )}
-                        {statusMap[selected.unit_id] === "ready" && (
-                          <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                        )}
-                        {statusMap[selected.unit_id] === "failed" && (
-                          <span className="h-1.5 w-1.5 rounded-full bg-red-400" />
-                        )}
-                        {stackTab === "preview" && (
-                          <span
-                            aria-hidden="true"
-                            className="absolute -bottom-px left-2.5 right-2.5 h-0.5 rounded bg-[var(--color-accent)]"
-                          />
-                        )}
-                      </button>
-                    </div>
-                  )}
-
-                  <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-                    {(!stackPreview || stackTab === "editor") && (
-                      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-                        <div
-                          role="tablist"
-                          aria-label={t("reference_editor_view_aria")}
-                          className="flex items-center gap-1 px-3 pt-2.5"
-                        >
-                          {(["script", "parse"] as const).map((view) => (
-                            <button
-                              key={view}
-                              type="button"
-                              role="tab"
-                              id={`reference-editor-view-tab-${view}`}
-                              aria-selected={editorView === view}
-                              aria-controls={`reference-editor-view-panel-${view}`}
-                              // 未选中的 tab 退出 Tab 序列，左右方向键在两者间移动：
-                              // tablist 的键盘约定是「Tab 进出控件组、方向键在组内切换」。
-                              tabIndex={editorView === view ? 0 : -1}
-                              onKeyDown={(e) => {
-                                if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
-                                e.preventDefault();
-                                const next = view === "script" ? "parse" : "script";
-                                setEditorView(next);
-                                document.getElementById(`reference-editor-view-tab-${next}`)?.focus();
-                              }}
-                              onClick={() => setEditorView(view)}
-                              className={`focus-ring rounded-md border px-2.5 py-1 text-[11.5px] font-medium transition-colors ${
-                                editorView === view
-                                  ? "border-[var(--color-accent)]/50 bg-[var(--color-accent-soft)] text-[var(--color-text)]"
-                                  : "border-[var(--color-hairline)] bg-[oklch(0.22_0.011_265_/_0.5)] text-[var(--color-text-3)] hover:text-[var(--color-text-2)]"
-                              }`}
-                            >
-                              {view === "script"
-                                ? t("reference_editor_view_script")
-                                : t("reference_editor_view_parse")}
-                            </button>
-                          ))}
-                        </div>
-                        {editorView === "script" ? (
-                          <div
-                            id="reference-editor-view-panel-script"
-                            role="tabpanel"
-                            aria-labelledby="reference-editor-view-tab-script"
-                            className="flex min-h-0 flex-1 flex-col overflow-hidden p-3"
-                          >
-                            <ReferenceVideoCard
-                              key={selected.unit_id}
-                              unit={selected}
-                              projectName={projectName}
-                              episode={episode}
-                              value={currentText}
-                              onChange={handlePromptChange}
-                            />
-                          </div>
-                        ) : (
-                          <div
-                            id="reference-editor-view-panel-parse"
-                            role="tabpanel"
-                            aria-labelledby="reference-editor-view-tab-parse"
-                            // 解析预览是只读的，面板内没有可聚焦后代：滚动容器兼作焦点目标，
-                            // 键盘用户切到这个 tab 后才能用 PageDown / 方向键读到折线以下的内容
-                            // （WAI tabs：tabpanel 无可聚焦内容时自身取 tabindex="0"）。
-                            tabIndex={0}
-                            className="flex min-h-0 flex-1 flex-col overflow-y-auto"
-                          >
-                            <ScriptPreviewPanel
-                              key={selected.unit_id}
-                              projectName={projectName}
-                              episode={episode}
-                              text={currentText}
-                              lookup={mentionLookup}
-                            />
-                          </div>
-                        )}
-                        {/* Editor bottom bar */}
-                        <div className="flex flex-shrink-0 items-center gap-2 border-t border-[var(--color-hairline-soft)] bg-[oklch(0.18_0.010_265_/_0.5)] px-3.5 py-2">
-                          <span
-                            className={`inline-flex items-center gap-1.5 text-[11px] ${
-                              isDirty ? "text-amber-300" : "text-[var(--color-text-4)]"
-                            }`}
-                          >
-                            {isDirty ? (
-                              <>
-                                <span
-                                  aria-hidden="true"
-                                  className="h-1.5 w-1.5 rounded-full bg-amber-400"
-                                />
-                                {t("reference_unsaved")}
-                              </>
-                            ) : (
-                              <>
-                                <span
-                                  aria-hidden="true"
-                                  className="h-1.5 w-1.5 rounded-full bg-emerald-400"
-                                />
-                                {t("reference_synced")}
-                              </>
-                            )}
-                          </span>
-                          <span className="flex-1" />
-                          <button
-                            type="button"
-                            onClick={() => void handleSave()}
-                            disabled={!isDirty || saving}
-                            className={`focus-ring inline-flex min-w-[80px] items-center justify-center gap-1.5 rounded-md px-3 py-1 text-xs font-semibold ${
-                              isDirty
-                                ? "text-[oklch(0.14_0_0)] [background:linear-gradient(180deg,var(--color-accent-2),var(--color-accent))] shadow-[inset_0_1px_0_oklch(1_0_0_/_0.3),0_4px_12px_-4px_var(--color-accent-glow)]"
-                                : "border border-[var(--color-hairline)] bg-[oklch(0.22_0.011_265_/_0.5)] text-[var(--color-text-4)]"
-                            } disabled:cursor-not-allowed`}
-                          >
-                            {saving ? (
-                              <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-                            ) : (
-                              <Save className="h-3.5 w-3.5" aria-hidden="true" />
-                            )}
-                            {saving ? t("common:saving") : t("common:save")}
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                    {stackPreview && stackTab === "preview" && (
-                      <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[linear-gradient(180deg,oklch(0.19_0.011_265_/_0.5),oklch(0.17_0.010_265_/_0.35))]">
-                        <UnitPreviewPanel
-                          unit={selected}
-                          projectName={projectName}
-                          status={statusMap[selected.unit_id]}
-                          errorMessage={failureMessage}
-                          busy={selectedBusy}
-                          estimatedCost={estimatedCost}
-                          actualCost={actualCost}
-                          narrationText={selectedNarrationText}
-                          narrationGenerating={ttsBusyUnitIds.has(selected.unit_id)}
-                          narrationEstimatedCost={narrationEstimatedCost}
-                          onGenerateNarration={onGenerateNarration}
-                          onGenerate={onGenerateVoid}
-                          generationBlocked={Boolean(selected.needs_replan)}
-                          onUploadVideo={handleUploadVideo}
-                          uploadingVideo={uploading.ids.has(selected.unit_id)}
-                          restoring={restoring.ids.has(selected.unit_id)}
-                          onRestoringChange={handleRestoringChange}
-                          checkBusy={isUnitLocked}
-                          onRestored={handleUnitsRefresh}
-                        />
-                      </div>
-                    )}
-                  </div>
-                </>
-              ) : !hasScript && !showPreprocess ? (
-                // 广告/短片没有脚本规划：没有正式脚本时直接从空白开始。
-                <NoScriptBlankState projectName={projectName} episode={episode} className="flex-1 text-xs" />
-              ) : hasScript && units.length === 0 ? (
-                <div className="flex flex-1 flex-col items-center justify-center gap-3 text-xs text-[var(--color-text-4)]">
-                  <p className="m-0">{t("reference_canvas_empty")}</p>
-                  <button
-                    type="button"
-                    onClick={onAdd}
-                    className="arc-btn-primary focus-ring inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-[12.5px] font-semibold"
-                  >
-                    <Plus className="h-3 w-3" aria-hidden="true" />
-                    {t("reference_unit_add_first")}
-                  </button>
-                </div>
-              ) : (
-                <div className="flex flex-1 items-center justify-center text-xs text-[var(--color-text-4)]">
-                  {t("reference_canvas_empty")}
-                </div>
-              )}
-            </div>
-
-            {/* 右：UnitPreviewPanel（仅大屏） */}
-            {!stackPreview && (
-              <div className="flex min-h-0 flex-col overflow-hidden border-l border-[var(--color-hairline)] bg-[linear-gradient(180deg,oklch(0.19_0.011_265_/_0.5),oklch(0.17_0.010_265_/_0.35))]">
-                <UnitPreviewPanel
-                  unit={selected}
-                  projectName={projectName}
-                  status={selected ? statusMap[selected.unit_id] : undefined}
-                  errorMessage={failureMessage}
-                  busy={selectedBusy}
-                  estimatedCost={estimatedCost}
-                  actualCost={actualCost}
-                  narrationText={selectedNarrationText}
-                  narrationGenerating={selected ? ttsBusyUnitIds.has(selected.unit_id) : false}
-                  narrationEstimatedCost={narrationEstimatedCost}
-                  onGenerateNarration={onGenerateNarration}
-                  onGenerate={onGenerateVoid}
-                  generationBlocked={Boolean(selected?.needs_replan)}
-                  onUploadVideo={handleUploadVideo}
-                  uploadingVideo={selected ? uploading.ids.has(selected.unit_id) : false}
-                  restoring={selected ? restoring.ids.has(selected.unit_id) : false}
-                  onRestoringChange={handleRestoringChange}
-                  checkBusy={isUnitLocked}
-                  onRestored={handleUnitsRefresh}
-                />
-              </div>
-            )}
+        // 工作台按画布宽度分档，列宽固定：
+        //   窄于 4xl：单元图标栏 + 中栏，预览叠进中栏；4xl 起预览单独成栏；
+        //   6xl 起图标栏换成完整列表；7xl 起预览栏加宽。
+        <div className="grid min-h-0 flex-1 grid-cols-[3.5rem_minmax(0,1fr)] grid-rows-[auto_minmax(0,1fr)] @4xl/canvas:grid-cols-[3.5rem_minmax(0,1fr)_20rem] @6xl/canvas:grid-cols-[20rem_minmax(0,1fr)_20rem] @7xl/canvas:grid-cols-[20rem_minmax(0,1fr)_22.5rem]">
+          <div className="col-start-1 row-start-1 row-end-3 flex min-h-0 @6xl/canvas:hidden">
+            <UnitRail
+              units={units}
+              selectedId={selectedUnitId}
+              onSelect={selectUnit}
+              onExpand={() => setListSheetOpen(true)}
+              statusMap={statusMap}
+              className="min-w-0 flex-1"
+            />
+          </div>
+          <div className="col-start-1 row-start-1 row-end-3 hidden min-h-0 @6xl/canvas:flex">
+            <UnitList
+              units={units}
+              selectedId={selectedUnitId}
+              onSelect={selectUnit}
+              onAdd={onAdd}
+              onMove={handleMove}
+              statusMap={statusMap}
+              className="min-w-0 flex-1"
+            />
           </div>
 
-          {/* 折叠态下的展开抽屉 */}
-          {listFlyoutOpen && (
+          <RetainedEditUnit identity={selected?.unit_id ?? "missing"} value={selected ? (
+            <UnitPromptEdit
+              key={selected.unit_id}
+              unit={selected}
+              onSave={handlePromptSave}
+              allowNavigation={allowNavigation}
+            >
+              {(edit) => renderSelectedUnit(selected, edit)}
+            </UnitPromptEdit>
+          ) : (
             <>
-              <button
-                type="button"
-                aria-label={t("common:close")}
-                onClick={() => setListFlyoutOpen(false)}
-                className="absolute inset-0 z-30 bg-black/40 backdrop-blur-[2px]"
-              />
-              <div
-                className="absolute bottom-0 left-0 top-0 z-40 w-[320px] shadow-[8px_0_24px_-8px_oklch(0_0_0_/_0.6)]"
-              >
-                <UnitList
-                  units={units}
-                  selectedId={selectedUnitId}
-                  onSelect={(id) => {
-                    select(id);
-                    setListFlyoutOpen(false);
-                  }}
-                  onAdd={onAdd}
-                  onMove={movingUnit ? undefined : onMove}
-                  dirtyMap={dirtyMap}
-                  statusMap={statusMap}
-                />
+              <div className="col-start-2 row-start-1 row-end-3 flex min-h-0 flex-col">
+                {!hasScript && !showPreprocess ? (
+                  // 广告/短片没有脚本规划：没有正式脚本时直接从空白开始。
+                  <NoScriptBlankState projectName={projectName} episode={episode} className="flex-1 text-xs" />
+                ) : hasScript && units.length === 0 ? (
+                  <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-sm text-muted-foreground">
+                    <p>{t("reference_canvas_empty")}</p>
+                    <Button onClick={onAdd}>
+                      <Plus aria-hidden data-icon="inline-start" />
+                      {t("reference_unit_add_first")}
+                    </Button>
+                  </div>
+                ) : (
+                  <p className="flex flex-1 items-center justify-center p-6 text-sm text-muted-foreground">
+                    {t("reference_canvas_empty")}
+                  </p>
+                )}
+              </div>
+              <div className="col-start-3 row-start-1 row-end-3 hidden min-h-0 flex-col border-l border-border @4xl/canvas:flex">
+                {renderPreview(null)}
               </div>
             </>
-          )}
+          )} message={t("reference_unit_externally_removed")}>
+            {(detail) => detail}
+          </RetainedEditUnit>
         </div>
-      )}
+      )}>
+        {(content) => content}
+      </RetainedEditUnit>
 
-      <ConfirmDialog
+      {/* 图标栏展开的完整列表：搜索、新增与排序 */}
+      <Sheet open={listSheetOpen} onOpenChange={setListSheetOpen}>
+        <SheetContent
+          side="left"
+          showCloseButton={false}
+          className="data-[side=left]:w-80"
+        >
+          <SheetTitle className="sr-only">{t("reference_unit_list_title")}</SheetTitle>
+          <UnitList
+            units={units}
+            selectedId={selectedUnitId}
+            onSelect={(id) => {
+              setListSheetOpen(false);
+              selectUnit(id);
+            }}
+            onAdd={() => {
+              setListSheetOpen(false);
+              onAdd();
+            }}
+            onMove={handleMove}
+            statusMap={statusMap}
+            className="min-h-0 flex-1 border-r-0"
+          />
+        </SheetContent>
+      </Sheet>
+
+      <AlertDialog
         open={removeUnitId !== null}
-        title={t("reference_unit_remove_title", { id: itemIdWithinEpisode(removeUnitId ?? "") })}
-        description={t("reference_unit_remove_desc")}
-        confirmLabel={t("reference_unit_remove_confirm")}
-        tone="danger"
-        loading={removingUnit}
-        confirmDisabled={removeUnitId !== null && isUnitRemovalBlocked(removeUnitId)}
-        onConfirm={handleRemoveUnit}
-        onCancel={() => setRemoveUnitId(null)}
-      />
+        onOpenChange={(open) => {
+          // 移除请求在途时不响应关闭，结果出来前对话框留在原处
+          if (!open && !removingUnit) setRemoveUnitId(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {t("reference_unit_remove_title", { id: itemIdWithinEpisode(removeUnitId ?? "") })}
+            </AlertDialogTitle>
+            <AlertDialogDescription>{t("reference_unit_remove_desc")}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={removingUnit}>{t("common:cancel")}</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              disabled={removingUnit || (removeUnitId !== null && isUnitRemovalBlocked(removeUnitId))}
+              // 离开拦截放在确认移除这一步：先问未保存修改再确认移除，放弃后取消移除就白丢了修改
+              onClick={() => confirmLeave(() => void handleRemoveUnit())}
+            >
+              {removingUnit ? <Loader2 aria-hidden data-icon="inline-start" className="animate-spin" /> : null}
+              {t("reference_unit_remove_confirm")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       <ReferenceDurationConfirmDialog {...durationGate.dialogProps} />
       <ReferenceBatchAdmissionDialog
         admission={batchAdmission}

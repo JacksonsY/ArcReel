@@ -1,7 +1,7 @@
 """资产级联重命名端到端测试：真实 ProjectManager 走 扫描 → 校验 → 落盘 全路径。
 
 覆盖四类资产、各 content_mode 骨架的引用改写（引用数组 / speaker / mention）、script_plan 草稿、
-关联文件与版本历史迁移、NFC/NFD 冲突拒绝与 dry-run 预览一致性。speaker 与 mention 不在
+关联文件与版本历史迁移、NFC/NFD 冲突拒绝与 dry-run 预览一致性，以及复用同一套扫描的删除前引用预览。speaker 与 mention 不在
 DataValidator 引用扫描范围内，须直接断言改写结果，不能只看校验无新增 error。
 """
 
@@ -43,6 +43,13 @@ from lib.project.asset_rename import (
 from lib.project.asset_types import ASSET_SPECS
 from lib.project.project_manager import ProjectManager, _rename_agnostic_errors
 from lib.script.draft_quarantine import QUARANTINE_FILENAMES
+from lib.script.script_review import (
+    apply_confirmation,
+    content_fingerprint,
+    formal_script_plan_confirmed,
+    review_status,
+    script_plan_path,
+)
 
 
 def _narration_script(**overrides: Any) -> dict[str, Any]:
@@ -159,6 +166,30 @@ def _load_script(pm_with_assets: ProjectManager) -> dict[str, Any]:
     return pm_with_assets.load_script("demo", "episode_1.json")
 
 
+def _write_confirmed_plan(manager: ProjectManager, plan: dict[str, Any]) -> Path:
+    """写下第 1 集的正式脚本规划并确认它。"""
+    manager.save_script("demo", _narration_script(), "episode_1.json")
+    path = script_plan_path(_project_dir(manager), manager.load_project("demo"), 1)
+    assert path is not None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(path, plan)
+    fingerprint = content_fingerprint(path)
+    assert fingerprint is not None
+
+    def confirm(project: dict[str, Any]) -> None:
+        apply_confirmation(project, 1, fingerprint, "2026-10-01T00:00:00+00:00")
+
+    manager.update_project("demo", confirm)
+    return path
+
+
+def _plan_review(manager: ProjectManager) -> tuple[str, bool]:
+    """第 1 集的内容确认状态，以及正式脚本规划是否因已确认而只读。"""
+    project = manager.load_project("demo")
+    project_dir = _project_dir(manager)
+    return review_status(project_dir, project, 1), formal_script_plan_confirmed(project_dir, project, 1)
+
+
 class TestRewritePayloadReferences:
     def test_only_matching_type_rewritten(self) -> None:
         payload = _narration_script()
@@ -197,6 +228,21 @@ class TestRewritePayloadReferences:
         shot = payload["shots"][0]
         assert shot["characters_in_shot"] == ["新角色"]
         assert shot["video_prompt"]["dialogue"][0]["speaker"] == "新角色"
+
+    def test_new_asset_targets_follow_the_type_they_point_at(self) -> None:
+        """并入项的 target 指向同类资产、衍生项的指向本体角色；衍生改名不碰只写本体名的 target。"""
+        payload = {
+            "new_assets": [
+                {"type": "character", "name": "小A", "decision": "merge", "target": "角色A"},
+                {"type": "character", "name": "夜装", "decision": "derivative", "target": "角色A"},
+                {"type": "scene", "name": "村头", "decision": "merge", "target": "角色A"},
+                {"type": "character", "name": "新人", "decision": "register", "target": "角色A"},
+            ]
+        }
+
+        assert rewrite_payload_references(payload, "character", "角色A/夜装", "角色A/夜行衣") == 0
+        assert rewrite_payload_references(payload, "character", "角色A", "主角甲") == 2
+        assert [item["target"] for item in payload["new_assets"]] == ["主角甲", "主角甲", "角色A", "角色A"]
 
     def test_narration_video_prompt_dialogue_speaker(self) -> None:
         # speaker 不在 DataValidator 引用扫描范围内，须直接断言改写（narration 的
@@ -365,6 +411,29 @@ class TestRenameAssetCascade:
         assert report.references == 1
         saved = json.loads((draft_dir / "script_plan_reference_units.json").read_text(encoding="utf-8"))
         assert saved["units"][0]["text"] == "@[主角甲] 在河边"
+
+    def test_confirmed_episode_stays_confirmed_and_its_merge_target_follows(
+        self, pm_with_assets: ProjectManager
+    ) -> None:
+        """改名只换名字：已确认的集不退回待确认，规划里并入该资产的新增项随之改指新名。"""
+        path = _write_confirmed_plan(
+            pm_with_assets,
+            {
+                "segments": [{"segment_id": "E1S01", "characters_in_segment": ["角色A"], "scenes": [], "props": []}],
+                "new_assets": [
+                    {"type": "character", "name": "小A", "decision": "merge", "reason": "同一人", "target": "角色A"}
+                ],
+            },
+        )
+        assert _plan_review(pm_with_assets) == ("confirmed", True)
+
+        report = pm_with_assets.rename_asset("demo", "characters", "角色A", "主角甲")
+
+        assert _plan_review(pm_with_assets) == ("confirmed", True)
+        plan = json.loads(path.read_text(encoding="utf-8"))
+        assert plan["segments"][0]["characters_in_segment"] == ["主角甲"]
+        assert plan["new_assets"][0]["target"] == "主角甲"
+        assert report.references == 3  # 正式脚本一处 + 规划引用数组一处 + 并入目标一处
 
     def test_sibling_with_numeric_suffix_untouched(self, pm_with_assets: ProjectManager) -> None:
         """``旧名_2`` 是合法资产名：兄弟资产的资产图不得被序号形态的 stem 匹配卷走。"""
@@ -1014,6 +1083,19 @@ class TestDerivativeReferenceCascade:
         assert _load_script(pm_with_assets)["segments"][0]["characters_in_segment"] == ["角色A", "角色A/夜行衣"]
         assert unbound.read_bytes() == before
 
+    def test_derivative_rename_keeps_a_confirmed_episode_confirmed(self, pm_with_assets: ProjectManager) -> None:
+        self._register(pm_with_assets, "劲装")
+        path = _write_confirmed_plan(
+            pm_with_assets,
+            {"segments": [{"segment_id": "E1S01", "characters_in_segment": ["角色A/劲装"], "scenes": [], "props": []}]},
+        )
+
+        pm_with_assets.rename_asset_derivative("character", "demo", "角色A", "劲装", "夜行衣")
+
+        assert _plan_review(pm_with_assets) == ("confirmed", True)
+        plan = json.loads(path.read_text(encoding="utf-8"))
+        assert plan["segments"][0]["characters_in_segment"] == ["角色A/夜行衣"]
+
     def test_derivative_rename_keeps_the_description(self, pm_with_assets: ProjectManager) -> None:
         self._register(pm_with_assets, "劲装")
 
@@ -1070,3 +1152,49 @@ class TestDerivativeReferenceCascade:
         pm_with_assets.rename_asset_derivative("character", "demo", "角色A", "劲装", "夜行衣")
 
         assert json.loads(draft_path.read_text())["units"][0]["text"] == "@[角色A/夜行衣] 推门"
+
+
+class TestAssetDeletionPreview:
+    """删除资产的 dry_run：只读扫描，引用数与重命名同一套扫描，按集列出。"""
+
+    @staticmethod
+    def _snapshot(project_dir: Path) -> dict[str, bytes]:
+        """项目目录下全部文件的字节，包括已有锁文件。"""
+        return {
+            str(path.relative_to(project_dir)): path.read_bytes() for path in project_dir.rglob("*") if path.is_file()
+        }
+
+    def test_preview_lists_references_by_episode_without_writing(self, pm_with_assets: ProjectManager) -> None:
+        TestDerivativeReferenceCascade._register(pm_with_assets, "劲装")
+        pm_with_assets.save_script("demo", _drama_script(), "episode_1.json")
+        reference_script = _reference_script(3)
+        reference_script["video_units"][0]["text"] = "@[角色A] 回头，@[角色A/劲装] 推门"
+        pm_with_assets.save_script("demo", reference_script, "episode_3.json")
+        draft_path = _project_dir(pm_with_assets) / "drafts" / "episode_2" / "script_plan_reference_units.json"
+        draft_path.parent.mkdir(parents=True)
+        atomic_write_json(draft_path, {"units": [{"unit_id": "E2U1", "text": "@[角色A] 在河边"}]})
+        project_dir = _project_dir(pm_with_assets)
+        before = self._snapshot(project_dir)
+
+        preview = pm_with_assets.preview_asset_deletion("demo", "characters", "角色A")
+
+        after = self._snapshot(project_dir)
+        added = after.keys() - before.keys()
+        assert all(Path(path).suffix == ".lock" and after[path] == b"" for path in added)
+        assert {path: content for path, content in after.items() if path not in added} == before
+        assert preview.name == "角色A"
+        assert [(item.episode, item.references) for item in preview.episodes] == [(1, 2), (2, 1), (3, 2)]
+        renamed = pm_with_assets.rename_asset("demo", "characters", "角色A", "主角甲", dry_run=True)
+        assert preview.references == renamed.references == 5
+        assert self._snapshot(project_dir) == after
+
+    def test_unreferenced_asset_previews_empty(self, pm_with_assets: ProjectManager) -> None:
+        pm_with_assets.save_script("demo", _reference_script(1), "episode_1.json")
+
+        preview = pm_with_assets.preview_asset_deletion("demo", "props", "道具A")
+
+        assert (preview.references, preview.episodes) == (0, ())
+
+    def test_missing_asset_raises_key_error(self, pm_with_assets: ProjectManager) -> None:
+        with pytest.raises(KeyError):
+            pm_with_assets.preview_asset_deletion("demo", "characters", "不存在")

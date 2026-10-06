@@ -97,12 +97,25 @@ const PAYLOADS: Record<string, string> = {
   "行内 HTML 链接": 'text <a href="javascript:window.__marker=1">x</a> text',
   "行内 HTML 事件属性": 'text <b onclick="window.__marker=1">x</b> text',
   "行内 HTML 实体编码协议": 'text <a href="&#106;avascript:window.__marker=1">x</a>',
+  "应用链接 javascript 协议": '<app-link href="javascript:window.__marker=1" onclick="window.__marker=1">x</app-link>',
+  "应用链接实体编码协议": '<app-link href="&#106;avascript:window.__marker=1">x</app-link>',
   "autolink javascript": "<javascript:window.__marker=1>",
   "裸 URL autolink": "见 javascript:window.__marker=1 与后文",
   "autolink data": "<data:text/html,window.__marker=1>",
   "form formaction": '<form><button formaction="javascript:window.__marker=1">x</button></form>',
   "style 标签": "<style>body{background:url(javascript:window.__marker=1)}</style>",
 };
+
+describe("StreamMarkdown 横向滚动区", () => {
+  it("代码块与表格可用键盘聚焦，并带有区域名称", async () => {
+    await renderLoaded("```ts\nconst answer = 42;\n```\n\n| 列 A | 列 B |\n| --- | --- |\n| 1 | 2 |\n");
+
+    const code = await screen.findByRole("region", { name: "代码块" });
+    expect(code).toHaveAttribute("tabindex", "0");
+    expect(code.querySelector("pre")).not.toBeNull();
+    expect(screen.getByRole("table", { name: "表格" })).toHaveAttribute("tabindex", "0");
+  });
+});
 
 describe("StreamMarkdown 渲染惰性", () => {
   it.each(Object.entries(PAYLOADS))("%s 渲染为惰性内容", async (_name, payload) => {

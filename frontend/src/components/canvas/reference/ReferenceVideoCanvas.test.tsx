@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, fireEvent, act, within } from "@testing-library/react";
+import { render as rtlRender, screen, waitFor, fireEvent, act, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import type { ReactElement } from "react";
+import { Router, useLocation } from "wouter";
+import { LeaveGuardProvider, useLeaveGuard } from "@/components/shared/edit-unit/LeaveGuard";
+import { EpisodeViewFactsProvider } from "@/components/canvas/episode-page/EpisodeViewScope";
+import type { EpisodeViewFacts } from "@/components/canvas/episode-page/episode-view";
 import { ReferenceVideoCanvas } from "./ReferenceVideoCanvas";
 import { useReferenceVideoStore, referenceVideoCacheKey } from "@/stores/reference-video-store";
 import { useProjectsStore } from "@/stores/projects-store";
@@ -73,9 +79,23 @@ function mkAdmission(patch: Record<string, unknown> = {}) {
   } as never;
 }
 
-// 单元预览面板的生成 CTA。锚定行首把批量入口「批量生成视频」排除在外——两者都含
+// 单元预览面板的生成 CTA。锚定行首把批量入口「补齐视频」排除在外——两者都含
 // 「生成视频」，不锚定会按 DOM 顺序先匹配到批量按钮，测到的就不是这条提交路径。
 const UNIT_GENERATE_CTA = /^(Generate video|生成视频)/;
+
+/** 与应用根部一致：画布挂在离开拦截之下，未保存的修改由它拦截。 */
+function render(ui: ReactElement) {
+  return rtlRender(ui, { wrapper: LeaveGuardProvider });
+}
+
+/** 打开时长下拉，返回各选项的秒数。 */
+async function openDurationOptions(): Promise<number[]> {
+  await userEvent.click(await screen.findByRole("combobox", { name: /Duration|时长/ }));
+  return (await screen.findAllByRole("option")).map((option) => Number.parseInt(option.textContent ?? "", 10));
+}
+
+/** 集页路由给画布的视图：缺省停在视频单元视图。 */
+const BOARD = { view: "board", onViewChange: () => {} } as const;
 
 function runningTask(unitId: string) {
   return {
@@ -149,7 +169,7 @@ describe("ReferenceVideoCanvas", () => {
     const save = vi
       .spyOn(API, "saveEpisodeDraft")
       .mockResolvedValue({ episode: 1, doc_type: "reference_prompt_authoring", adopted: true, draft: null });
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
 
     expect(await screen.findByText("unit U2 使用了全角花括号")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "U2 · 1" })).toBeInTheDocument();
@@ -169,7 +189,7 @@ describe("ReferenceVideoCanvas", () => {
 
   it("loads units on mount and renders the list", async () => {
     vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: [mkUnit("E1U1"), mkUnit("E1U2")], unit_capabilities: {} });
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
     await waitFor(() => expect(screen.getByTestId("unit-row-E1U1")).toBeInTheDocument());
     expect(screen.getByTestId("unit-row-E1U2")).toBeInTheDocument();
   });
@@ -179,7 +199,7 @@ describe("ReferenceVideoCanvas", () => {
     const bare: ReferenceVideoUnit = mkUnit("E1U1");
     delete bare.generated_assets;
     vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: [bare, mkUnit("E1U2")], unit_capabilities: {} });
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
     await waitFor(() => expect(screen.getByTestId("unit-row-E1U1")).toBeInTheDocument());
     expect(screen.getByTestId("unit-row-E1U2")).toBeInTheDocument();
   });
@@ -187,11 +207,11 @@ describe("ReferenceVideoCanvas", () => {
   it("removes the selected unit only after the danger confirmation", async () => {
     vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: [mkUnit("E1U1"), mkUnit("E1U2")], unit_capabilities: {} });
     const deleteSpy = vi.spyOn(API, "deleteReferenceVideoUnit").mockResolvedValue(undefined);
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
     await screen.findByTestId("unit-row-E1U1");
 
     fireEvent.click(await screen.findByRole("button", { name: /^(Remove unit|移除单元)$/ }));
-    const dialog = screen.getByRole("dialog");
+    const dialog = screen.getByRole("alertdialog");
     expect(within(dialog).getByText(/U1/)).toBeInTheDocument();
     expect(deleteSpy).not.toHaveBeenCalled();
 
@@ -200,19 +220,47 @@ describe("ReferenceVideoCanvas", () => {
     await waitFor(() => expect(deleteSpy).toHaveBeenCalledWith("proj", 1, "E1U1"));
     await waitFor(() => expect(screen.queryByTestId("unit-row-E1U1")).not.toBeInTheDocument());
     expect(screen.getByTestId("unit-row-E1U2")).toBeInTheDocument();
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  it("asks about unsaved edits only once the removal is confirmed, so cancelling the removal keeps them", async () => {
+    vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: [mkUnit("E1U1"), mkUnit("E1U2")], unit_capabilities: {} });
+    const deleteSpy = vi.spyOn(API, "deleteReferenceVideoUnit").mockResolvedValue(undefined);
+    const discard = vi.fn();
+    function DirtyUnit() {
+      useLeaveGuard({ dirty: true, save: async () => true, discard });
+      return null;
+    }
+    render(<><DirtyUnit /><ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} /></>);
+    await screen.findByTestId("unit-row-E1U1");
+    const removal = async () => {
+      fireEvent.click(screen.getByRole("button", { name: /^(Remove unit|移除单元)$/ }));
+      const dialog = await screen.findByRole("alertdialog");
+      expect(within(dialog).getByText(/U1/)).toBeInTheDocument();
+      return dialog;
+    };
+
+    fireEvent.click(within(await removal()).getByRole("button", { name: /^(Cancel|取消)$/ }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    expect(discard).not.toHaveBeenCalled();
+
+    fireEvent.click(within(await removal()).getByRole("button", { name: /^(Remove unit|移除单元)$/ }));
+    fireEvent.click(within(await screen.findByRole("alertdialog", { name: "有未保存的修改" })).getByRole("button", { name: "放弃修改" }));
+
+    await waitFor(() => expect(deleteSpy).toHaveBeenCalledWith("proj", 1, "E1U1"));
+    expect(discard).toHaveBeenCalledTimes(1);
   });
 
   it("does not remove a unit that became busy after the confirmation opened", async () => {
     vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: [mkUnit("E1U1"), mkUnit("E1U2")], unit_capabilities: {} });
     const deleteSpy = vi.spyOn(API, "deleteReferenceVideoUnit").mockResolvedValue(undefined);
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
     fireEvent.click(await screen.findByRole("button", { name: /^(Remove unit|移除单元)$/ }));
 
     act(() => {
       useTasksStore.setState({ tasks: [runningTask("E1U1")] as never });
     });
-    const confirm = within(screen.getByRole("dialog")).getByRole("button", { name: /^(Remove unit|移除单元)$/ });
+    const confirm = within(screen.getByRole("alertdialog")).getByRole("button", { name: /^(Remove unit|移除单元)$/ });
     await waitFor(() => expect(confirm).toBeDisabled());
     fireEvent.click(confirm);
 
@@ -222,54 +270,47 @@ describe("ReferenceVideoCanvas", () => {
   it("blocks removing a unit while its narration audio is being generated", async () => {
     vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: [mkUnit("E1U1"), mkUnit("E1U2")], unit_capabilities: {} });
     useTasksStore.setState({ tasks: [{ ...runningTask("E1U1"), task_type: "tts" }] as never });
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
 
     await screen.findByTestId("unit-row-E1U1");
     expect(screen.getByRole("button", { name: /^(Remove unit|移除单元)$/ })).toBeDisabled();
   });
 
-  it("drops the removed unit's unsaved draft so it neither blocks unload nor resurfaces on a reused id", async () => {
-    vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: [mkUnit("E1U1", "server text")], unit_capabilities: {} });
-    vi.spyOn(API, "deleteReferenceVideoUnit").mockResolvedValue(undefined);
-    vi.spyOn(API, "addReferenceVideoUnit").mockResolvedValue({
-      unit: mkUnit("E1U1", "fresh unit"),
-      // 无档位结论：只出现正文编辑器这一个 combobox，下方按角色查询才不会歧义。
-      unit_capability: makeReferenceUnitCapability("E1U1", { allowed_durations: null }),
-    });
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
-    const textarea = (await screen.findByRole("combobox")) as HTMLTextAreaElement;
-    fireEvent.change(textarea, { target: { value: "unsaved edit" } });
-
-    fireEvent.click(screen.getByRole("button", { name: /^(Remove unit|移除单元)$/ }));
-    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: /^(Remove unit|移除单元)$/ }));
-    await waitFor(() => expect(screen.queryByTestId("unit-row-E1U1")).not.toBeInTheDocument());
-
-    await waitFor(() => {
-      const unload = new Event("beforeunload", { cancelable: true });
-      window.dispatchEvent(unload);
-      expect(unload.defaultPrevented).toBe(false);
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: /Add video unit|新增视频单元/ }));
-    await waitFor(() => expect((screen.getByRole("combobox") as HTMLTextAreaElement).value).toContain("fresh unit"));
+  it("外部删除当前视频单元时保留可见修改，放弃后采用真实状态", async () => {
+    const units = [mkUnit("E1U1", "server text"), mkUnit("E1U2", "next unit")];
+    vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units, unit_capabilities: {} });
+    vi.spyOn(API, "patchReferenceVideoUnit").mockRejectedValue(new Error("单元已不存在"));
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
+    fireEvent.change(await screen.findByRole("combobox"), { target: { value: "unsaved edit" } });
+    act(() => useReferenceVideoStore.setState((state) => ({ unitsByEpisode: { ...state.unitsByEpisode, [referenceVideoCacheKey("proj", 1)]: [units[1]] } })));
+    expect(screen.getByRole("combobox")).toHaveValue("unsaved edit");
+    expect(screen.getByText(/这个视频单元已被删除/)).toHaveAttribute("role", "status");
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("单元已不存在");
+    expect(screen.getByRole("combobox")).toHaveValue("unsaved edit");
+    fireEvent.click(screen.getByRole("button", { name: "放弃修改" }));
+    expect(screen.getByRole("combobox")).toHaveValue("next unit");
   });
 
-  it("keeps request controls outside the tablist semantics", async () => {
-    vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: [mkUnit("E1U1")], unit_capabilities: {} });
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
-
-    await screen.findByTestId("unit-row-E1U1");
-    const tablist = screen.getByRole("tablist", {
-      name: /Workspace main tabs|工作台主面板切换|Tab chính của workspace/,
-    });
-    const batch = screen.getByRole("button", { name: /Batch generate videos|批量生成视频/ });
-    expect(within(tablist).getAllByRole("tab")).toHaveLength(2);
-    expect(tablist).not.toContainElement(batch);
+  it("外部提示词草稿到达时保留正在编辑的单元，放弃后才显示草稿", async () => {
+    vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: [mkUnit("E1U1", "正式正文")], unit_capabilities: {} });
+    const listDrafts = vi.spyOn(API, "listEpisodeDrafts").mockResolvedValue({ episode: 1, drafts: [] });
+    vi.spyOn(API, "getEpisodeDraft").mockResolvedValue({ episode: 1, doc_type: "reference_prompt_authoring", revision: "rev-2", editable_by: "user", content: { title: "第一集", units: [{ text: "新的提示词草稿" }] }, violations: [{ code: "fullwidth_braces", label: "unit E1U1", message: "草稿需要修复", line: 0, item_index: 0 }], soft_violations: [], formal_exists: true, item_ids: ["E1U1"] });
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
+    fireEvent.change(await screen.findByRole("combobox"), { target: { value: "保留单元修改" } });
+    listDrafts.mockResolvedValue({ episode: 1, drafts: [{ doc_type: "reference_prompt_authoring", editable_by: "user", violation_count: 1 }] });
+    act(() => useAppStore.getState().invalidateEntities(["draft:episode_1_prompt_authoring"]));
+    expect(await screen.findByText(/本集有新的提示词草稿/)).toHaveAttribute("role", "status");
+    expect(screen.getByRole("combobox")).toHaveValue("保留单元修改");
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "放弃修改" }));
+    expect(await screen.findByRole("textbox", { name: "U1 正文" })).toHaveValue("新的提示词草稿");
   });
 
   it("auto-selects first unit on load and shows preview generate button", async () => {
     vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: [mkUnit("E1U1")], unit_capabilities: {} });
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
     await waitFor(() => {
       expect(screen.getByRole("button", { name: /Generate video|生成视频/ })).toBeInTheDocument();
     });
@@ -283,7 +324,7 @@ describe("ReferenceVideoCanvas", () => {
       utterances: [],
       warnings: [{ key: "ref_warn_unregistered_mention", message: "@[王五] 未在角色/场景/道具中登记" }],
     });
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
 
     await screen.findByRole("combobox");
     fireEvent.click(await screen.findByRole("tab", { name: /Parse preview|解析预览/ }));
@@ -296,33 +337,18 @@ describe("ReferenceVideoCanvas", () => {
     expect(await screen.findByRole("combobox")).toBeInTheDocument();
   });
 
-  // 两个 tabpanel 同时刻只挂载一个，共用静态 id 会让未选中 tab 的 aria-controls
-  // 指向当前激活面板——而该面板的 aria-labelledby 归属对方 tab，读屏播报错位。
-  it("points each editor-view tab at its own panel", async () => {
+  // 解析预览只读、没有可聚焦的后代：面板自身须能接焦点，键盘用户才翻得到折线以下的内容
+  it("lets the keyboard reach the read-only parse preview", async () => {
     vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({
       units: [mkUnit("E1U1", "中景。")], unit_capabilities: {} });
     vi.spyOn(API, "previewReferenceScript").mockResolvedValue({
       utterances: [],
       warnings: [],
     });
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
 
-    const scriptTab = await screen.findByRole("tab", { name: /^(Script|文稿)$/ });
-    const parseTab = screen.getByRole("tab", { name: /Parse preview|解析预览/ });
-    const scriptControls = scriptTab.getAttribute("aria-controls");
-    const parseControls = parseTab.getAttribute("aria-controls");
-    expect(scriptControls).not.toBe(parseControls);
-
-    // 每个 tab 指向的面板，其 aria-labelledby 必须指回该 tab 自身
-    const scriptPanel = screen.getByRole("tabpanel");
-    expect(scriptPanel.id).toBe(scriptControls);
-    expect(scriptPanel).toHaveAttribute("aria-labelledby", scriptTab.id);
-
-    fireEvent.click(parseTab);
-    const parsePanel = await screen.findByRole("tabpanel");
-    expect(parsePanel.id).toBe(parseControls);
-    expect(parsePanel).toHaveAttribute("aria-labelledby", parseTab.id);
-    // 解析预览只读、无可聚焦后代：面板自身须能接焦点，否则键盘用户翻不到折线以下的内容
+    fireEvent.click(await screen.findByRole("tab", { name: /Parse preview|解析预览/ }));
+    const parsePanel = await screen.findByRole("tabpanel", { name: /Parse preview|解析预览/ });
     expect(parsePanel).toHaveAttribute("tabindex", "0");
   });
 
@@ -343,7 +369,7 @@ describe("ReferenceVideoCanvas", () => {
       utterances: [],
       warnings: [],
     });
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
 
     await screen.findByRole("combobox");
     fireEvent.click(await screen.findByRole("tab", { name: /Parse preview|解析预览/ }));
@@ -359,7 +385,7 @@ describe("ReferenceVideoCanvas", () => {
   it("renders the ReferenceVideoCard textarea once auto-selected", async () => {
     vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({
       units: [mkUnit("E1U1")], unit_capabilities: {} });
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
     const ta = await screen.findByRole("combobox");
     expect((ta as HTMLTextAreaElement).value).toContain("x");
   });
@@ -380,7 +406,7 @@ describe("ReferenceVideoCanvas", () => {
       .spyOn(API, "generateNarrationAudio")
       .mockResolvedValue({ success: true, task_id: "tts-1", deduped: false, message: "queued" });
 
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
     fireEvent.click(await screen.findByRole("button", { name: /生成旁白配音|Generate narration audio/ }));
 
     await waitFor(() =>
@@ -409,7 +435,7 @@ describe("ReferenceVideoCanvas", () => {
       },
     });
 
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
 
     await waitFor(() => expect(document.querySelector('audio[src*="audio/segment_E1U1.wav"]')).not.toBeNull());
     expect(screen.queryByRole("button", { name: /生成旁白配音|Generate narration audio/ })).not.toBeInTheDocument();
@@ -424,7 +450,7 @@ describe("ReferenceVideoCanvas", () => {
       .spyOn(API, "patchReferenceVideoUnit")
       .mockResolvedValue({ unit: { ...unit, text: "@[张三] 推门而入。" }, unit_capability: makeReferenceUnitCapability("E1U1") });
 
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
     const ta = await screen.findByRole("combobox");
     fireEvent.change(ta, { target: { value: "@[张三] 推门而入。" } });
 
@@ -434,18 +460,197 @@ describe("ReferenceVideoCanvas", () => {
     );
   });
 
+  it("图标栏展开的完整列表里也能用键盘排序", async () => {
+    // jsdom 不做布局：按条目在列表里的位置给出纵向排开的矩形，键盘拖动才有落点可算。
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const item = this.closest("li");
+      const index = item ? Array.from(item.parentElement?.children ?? []).indexOf(item) : 0;
+      return DOMRect.fromRect({ x: 0, y: index * 60, width: 300, height: 60 });
+    });
+    const units = [mkUnit("E1U1"), mkUnit("E1U2"), mkUnit("E1U3")];
+    vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units, unit_capabilities: {} });
+    const moveSpy = vi
+      .spyOn(API, "moveReferenceVideoUnit")
+      .mockResolvedValue({ units: [units[1], units[0], units[2]] });
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /Expand list|展开列表/ }));
+    const sheet = within(await screen.findByRole("dialog"));
+    sheet.getByRole("button", { name: /U2/, description: /空格|space/i }).focus();
+    await userEvent.keyboard(" ");
+    await waitFor(() => expect(screen.getByText(/已拿起「U2」|picked up/i)).toBeInTheDocument());
+    // 弹层会拦下方向键的冒泡；焦点在把手上时须放行给排序
+    await userEvent.keyboard("{ArrowUp}");
+    await waitFor(() => expect(screen.getByText(/「U2」移到第 1 项|moved to position 1/i)).toBeInTheDocument());
+    await userEvent.keyboard(" ");
+
+    await waitFor(() => expect(moveSpy).toHaveBeenCalledWith("proj", 1, "E1U2", null));
+  });
+
+  describe("正文编辑单元", () => {
+    /** 在离开拦截之下导航：`base` 模拟项目路由的嵌套前缀。 */
+    let navigate: (to: string) => void = () => {};
+    function Navigator() {
+      [, navigate] = useLocation();
+      return null;
+    }
+    /** 有剧本的参考生视频集：缺省视图是视频单元，另有脚本规划与剪辑。 */
+    const FACTS: EpisodeViewFacts = {
+      isAd: false,
+      route: "reference_video",
+      grid: false,
+      hasScript: true,
+      hasDraft: true,
+      sourceReview: false,
+      demo: false,
+    };
+    function renderAt(path: string, base = "") {
+      window.history.replaceState(null, "", `${base}${path}`);
+      return rtlRender(
+        <LeaveGuardProvider>
+          <Router base={base}>
+            <Navigator />
+            <EpisodeViewFactsProvider value={FACTS}>
+              <ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />
+            </EpisodeViewFactsProvider>
+          </Router>
+        </LeaveGuardProvider>,
+      );
+    }
+    afterEach(() => window.history.replaceState(null, "", "/"));
+
+    it("「保存并生成」先保存正文，再为该单元入队", async () => {
+      const unit = mkUnit("E1U1", "推门。");
+      vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: [unit], unit_capabilities: {} });
+      const patchSpy = vi
+        .spyOn(API, "patchReferenceVideoUnit")
+        .mockResolvedValue({ unit: { ...unit, text: "推门而入。" }, unit_capability: makeReferenceUnitCapability("E1U1") });
+      const genSpy = vi
+        .spyOn(API, "generateReferenceVideoUnit")
+        .mockResolvedValue({ task_id: "t1", deduped: false });
+      render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
+
+      fireEvent.change(await screen.findByRole("combobox"), { target: { value: "推门而入。" } });
+      fireEvent.click(screen.getByRole("button", { name: /^(Save and generate|保存并生成)$/ }));
+
+      await waitFor(() => expect(genSpy).toHaveBeenCalled());
+      expect(patchSpy).toHaveBeenCalledWith("proj", 1, "E1U1", { prompt: "推门而入。" });
+      expect(patchSpy.mock.invocationCallOrder[0]).toBeLessThan(genSpy.mock.invocationCallOrder[0]);
+    });
+
+    it("旁白同样先保存正文再生成", async () => {
+      const unit = mkUnit("E1U1", "镜头推进。\n{夜色深沉。}");
+      vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: [unit], unit_capabilities: {} });
+      useProjectsStore.setState({ currentProjectData: { ...STUB_PROJECT, narration_delivery: "use_tts", episodes: [{ episode: 1, title: "", script_file: "episode_1.json" }] } });
+      const save = vi.spyOn(API, "patchReferenceVideoUnit").mockResolvedValue({ unit: { ...unit, text: "镜头推进。\n{天亮了。}" }, unit_capability: makeReferenceUnitCapability("E1U1", { allowed_durations: null }) });
+      const generate = vi.spyOn(API, "generateNarrationAudio").mockResolvedValue({ success: true, task_id: "tts-1", deduped: false, message: "queued" });
+      render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
+      fireEvent.change(await screen.findByRole("combobox"), { target: { value: "镜头推进。\n{天亮了。}" } });
+      fireEvent.click(screen.getAllByRole("button", { name: "保存并生成" }).at(-1)!);
+      await waitFor(() => expect(generate).toHaveBeenCalled());
+      expect(save.mock.invocationCallOrder[0]).toBeLessThan(generate.mock.invocationCallOrder[0]);
+      expect(save).toHaveBeenCalledWith("proj", 1, "E1U1", { prompt: "镜头推进。\n{天亮了。}" });
+    });
+
+    it("有修改时预览先保存正文", async () => {
+      const unit = mkUnit("E1U1", "推门。");
+      vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: [unit], unit_capabilities: {} });
+      const patch = vi.spyOn(API, "patchReferenceVideoUnit").mockResolvedValue({ unit: { ...unit, text: "推门而入。" }, unit_capability: makeReferenceUnitCapability("E1U1") });
+      const preview = vi.spyOn(API, "previewReferenceUnitPrompt").mockResolvedValue({ text: "最终提示词", is_text_form: true, unavailable: null, references: [], warnings: [] });
+      render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
+      fireEvent.change(await screen.findByRole("combobox"), { target: { value: "推门而入。" } });
+      fireEvent.click(screen.getByRole("button", { name: "保存并预览" }));
+      expect(await screen.findByText("最终提示词")).toBeInTheDocument();
+      expect(patch.mock.invocationCallOrder[0]).toBeLessThan(preview.mock.invocationCallOrder[0]);
+      expect(patch).toHaveBeenCalledWith("proj", 1, "E1U1", { prompt: "推门而入。" });
+    });
+
+    it("正文保存失败时不请求预览", async () => {
+      vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: [mkUnit("E1U1", "推门。")], unit_capabilities: {} });
+      vi.spyOn(API, "patchReferenceVideoUnit").mockRejectedValue(new Error("正文写入失败"));
+      const preview = vi.spyOn(API, "previewReferenceUnitPrompt");
+      render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
+      fireEvent.change(await screen.findByRole("combobox"), { target: { value: "推门而入。" } });
+      fireEvent.click(screen.getByRole("button", { name: "保存并预览" }));
+      expect(await screen.findByText(/正文写入失败/)).toBeInTheDocument();
+      expect(preview).not.toHaveBeenCalled();
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(screen.getByRole("combobox")).toHaveValue("推门而入。");
+    });
+
+    it("正文保存失败时不入队，错误留在提示条上", async () => {
+      vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: [mkUnit("E1U1", "推门。")], unit_capabilities: {} });
+      vi.spyOn(API, "patchReferenceVideoUnit").mockRejectedValue(new Error("磁盘已满"));
+      const genSpy = vi.spyOn(API, "generateReferenceVideoUnit");
+      render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
+
+      fireEvent.change(await screen.findByRole("combobox"), { target: { value: "推门而入。" } });
+      fireEvent.click(screen.getByRole("button", { name: /^(Save and generate|保存并生成)$/ }));
+
+      expect(await screen.findByText(/磁盘已满/)).toBeInTheDocument();
+      expect(genSpy).not.toHaveBeenCalled();
+    });
+
+    it("有未保存的正文时切换单元先询问，放弃修改后才切换", async () => {
+      vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({
+        units: [mkUnit("E1U1", "hello from A"), mkUnit("E1U2", "hello from B")], unit_capabilities: {} });
+      const patchSpy = vi.spyOn(API, "patchReferenceVideoUnit");
+      render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
+      fireEvent.change(await screen.findByRole("combobox"), { target: { value: "edited A" } });
+
+      fireEvent.click(screen.getByTestId("unit-row-E1U2"));
+      const dialog = within(await screen.findByRole("alertdialog"));
+      expect(dialog.getByText(/「U1」有未保存的修改|“U1” has unsaved changes/)).toBeInTheDocument();
+      expect(dialog.getByRole("button", { name: /^(Save and switch|保存并切换)$/ })).toBeInTheDocument();
+      expect(useReferenceVideoStore.getState().selectedUnitId).toBe("E1U1");
+
+      fireEvent.click(dialog.getByRole("button", { name: /^(Discard changes|放弃修改)$/ }));
+      await waitFor(() => expect((screen.getByRole("combobox") as HTMLTextAreaElement).value).toBe("hello from B"));
+      expect(patchSpy).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["", "/episodes/1"],
+      ["/app/projects/proj", "/episodes/1"],
+    ])("有未保存的正文时切到脚本规划会询问（base=%s）", async (base, path) => {
+      vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: [mkUnit("E1U1", "推门。")], unit_capabilities: {} });
+      renderAt(`${path}?view=board`, base);
+      fireEvent.change(await screen.findByRole("combobox"), { target: { value: "推门而入。" } });
+
+      act(() => navigate(`${path}?view=plan`));
+      expect(await screen.findByRole("alertdialog")).toBeInTheDocument();
+      expect(window.location.search).toBe("?view=board");
+    });
+
+    it.each([
+      ["", "/episodes/1"],
+      ["/app/projects/proj", "/episodes/1"],
+    ])("停留在视频单元视图的跳转不询问，去剪辑视图时询问（base=%s）", async (base, path) => {
+      vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: [mkUnit("E1U1", "推门。")], unit_capabilities: {} });
+      renderAt(`${path}?view=board`, base);
+      fireEvent.change(await screen.findByRole("combobox"), { target: { value: "推门而入。" } });
+
+      // 有剧本时缺省视图就是视频单元：去掉 view 仍停在原视图
+      act(() => navigate(path));
+      expect(window.location.pathname + window.location.search).toBe(`${base}${path}`);
+      expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+
+      act(() => navigate(`${path}?view=edit`));
+      expect(await screen.findByRole("alertdialog")).toBeInTheDocument();
+      expect(window.location.search).toBe("");
+    });
+  });
+
   // 未登记的 `@[名称]` 只是提示：保存与生成入口都不受影响。
   it("keeps saving and generating available when the body mentions an unregistered name", async () => {
     const unit = mkUnit("E1U1", "推门。");
     vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: [unit], unit_capabilities: {} });
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
     const ta = await screen.findByRole("combobox");
     fireEvent.change(ta, { target: { value: "@[查无此人] 推门而入。" } });
 
     expect(await screen.findByRole("button", { name: /^(Save|保存)$/ })).toBeEnabled();
-    for (const btn of screen.getAllByRole("button", { name: /Generate video|生成视频/ })) {
-      expect(btn).toBeEnabled();
-    }
+    expect(screen.getByRole("button", { name: /^(Save and generate|保存并生成)$/ })).toBeEnabled();
   });
 
   // 时长是 unit 级单一真相：下拉档位来自服务端逐单元结论，选中即单独 PATCH（不牵连正文草稿）
@@ -458,12 +663,9 @@ describe("ReferenceVideoCanvas", () => {
       unit: { ...mkUnit("E1U1"), duration_seconds: 8 },
       unit_capability: makeReferenceUnitCapability("E1U1"),
     });
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
-    const select = (await screen.findByRole("combobox", {
-      name: /Duration|时长/,
-    })) as HTMLSelectElement;
-    expect(Array.from(select.options).map((o) => o.value)).toEqual(["3", "8"]);
-    fireEvent.change(select, { target: { value: "8" } });
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
+    expect(await openDurationOptions()).toEqual([3, 8]);
+    await userEvent.click(screen.getByRole("option", { name: /^8/ }));
     await waitFor(() =>
       expect(patchSpy).toHaveBeenCalledWith("proj", 1, "E1U1", { duration_seconds: 8 }),
     );
@@ -476,7 +678,7 @@ describe("ReferenceVideoCanvas", () => {
       .spyOn(API, "patchReferenceVideoUnit")
       .mockResolvedValue({ unit: { ...unit, duration_seconds: 120 }, unit_capability: makeReferenceUnitCapability("E1U1") });
 
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} freeDuration />);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} freeDuration />);
     const input = await screen.findByRole("spinbutton", { name: /Duration|时长/ });
     fireEvent.focus(input);
     fireEvent.change(input, { target: { value: "1" } });
@@ -497,17 +699,44 @@ describe("ReferenceVideoCanvas", () => {
     vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: [unit], unit_capabilities: {} });
     const patchSpy = vi.spyOn(API, "patchReferenceVideoUnit");
 
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} freeDuration />);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} freeDuration />);
     const input = await screen.findByRole("spinbutton", { name: /Duration|时长/ });
     fireEvent.focus(input);
     fireEvent.change(input, { target: { value: "12" } });
 
+    // 离开拦截在关闭标签页时请求浏览器原生提示
     await waitFor(() => {
       const event = new Event("beforeunload", { cancelable: true });
       window.dispatchEvent(event);
       expect(event.defaultPrevented).toBe(true);
     });
     expect(patchSpy).not.toHaveBeenCalled();
+  });
+
+  it("时长失焦提交在途时切换单元，等提交落定后直接切换，不询问也不重复提交", async () => {
+    const units = [mkUnit("E1U1"), mkUnit("E1U2")];
+    vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units, unit_capabilities: {} });
+    let accept: () => void = () => {};
+    const patchSpy = vi.spyOn(API, "patchReferenceVideoUnit").mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          accept = () => resolve({ unit: { ...units[0], duration_seconds: 12 }, unit_capability: makeReferenceUnitCapability("E1U1") });
+        }),
+    );
+
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} freeDuration />);
+    const input = await screen.findByRole("spinbutton", { name: /Duration|时长/ });
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "12" } });
+    fireEvent.blur(input);
+    fireEvent.click(screen.getByTestId("unit-row-E1U2"));
+
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(useReferenceVideoStore.getState().selectedUnitId).toBe("E1U1");
+    await act(async () => accept());
+    await waitFor(() => expect(useReferenceVideoStore.getState().selectedUnitId).toBe("E1U2"));
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(patchSpy).toHaveBeenCalledTimes(1);
   });
 
   it("lets an explicit same-value duration confirm a duration-only replan marker", async () => {
@@ -517,7 +746,7 @@ describe("ReferenceVideoCanvas", () => {
       .spyOn(API, "patchReferenceVideoUnit")
       .mockResolvedValue({ unit: { ...unit, needs_replan: false }, unit_capability: makeReferenceUnitCapability("E1U1") });
 
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} freeDuration />);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} freeDuration />);
     const input = await screen.findByRole("spinbutton", { name: /Duration|时长/ });
     fireEvent.change(input, { target: { value: "" } });
     fireEvent.change(input, { target: { value: "3" } });
@@ -540,9 +769,9 @@ describe("ReferenceVideoCanvas", () => {
       unit_capability: makeReferenceUnitCapability("E1U1"),
     });
     const fetchSpy = vi.spyOn(useCostStore.getState(), "debouncedFetch").mockImplementation(() => {});
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
-    const select = await screen.findByRole("combobox", { name: /Duration|时长/ });
-    fireEvent.change(select, { target: { value: "8" } });
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
+    await openDurationOptions();
+    await userEvent.click(screen.getByRole("option", { name: /^8/ }));
     await waitFor(() => expect(fetchSpy).toHaveBeenCalledWith("proj"));
   });
 
@@ -552,12 +781,9 @@ describe("ReferenceVideoCanvas", () => {
       units: [mkUnit("E1U1")],
       unit_capabilities: { E1U1: makeReferenceUnitCapability("E1U1", { allowed_durations: [4, 8] }) },
     });
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
-    const select = (await screen.findByRole("combobox", {
-      name: /Duration|时长/,
-    })) as HTMLSelectElement;
-    expect(Array.from(select.options).map((o) => o.value)).toEqual(["3", "4", "8"]);
-    expect(select.value).toBe("3");
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
+    expect(await screen.findByRole("combobox", { name: /Duration|时长/ })).toHaveTextContent(/^3/);
+    expect(await openDurationOptions()).toEqual([3, 4, 8]);
   });
 
   // 桶由服务端按此刻可用的参考图判定：正文提及了已登记的角色但角色还没有参考图，服务端落 i2v，
@@ -589,11 +815,8 @@ describe("ReferenceVideoCanvas", () => {
         }),
       },
     });
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
-    const select = (await screen.findByRole("combobox", {
-      name: /Duration|时长/,
-    })) as HTMLSelectElement;
-    expect(Array.from(select.options).map((o) => o.value)).toEqual(["3", "4", "8"]);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
+    expect(await openDurationOptions()).toEqual([3, 4, 8]);
     // 分裂以结构化块点名：缺图的引用与桶的改变，不静默换桶。
     const alert = screen.getByTestId("reference-split-alert");
     expect(alert).toHaveTextContent("引用的资产缺图：王");
@@ -612,11 +835,8 @@ describe("ReferenceVideoCanvas", () => {
         }),
       },
     });
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
-    const select = (await screen.findByRole("combobox", {
-      name: /Duration|时长/,
-    })) as HTMLSelectElement;
-    expect(Array.from(select.options).map((o) => o.value)).toEqual(["3", "8"]);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
+    expect(await openDurationOptions()).toEqual([3, 8]);
     expect(screen.queryByTestId("reference-split-alert")).not.toBeInTheDocument();
   });
 
@@ -626,8 +846,8 @@ describe("ReferenceVideoCanvas", () => {
       units: [mkUnit("E1U1")],
       unit_capabilities: { E1U1: makeReferenceUnitCapability("E1U1", { allowed_durations: null }) },
     });
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
-    expect((await screen.findAllByText("3s")).length).toBeGreaterThan(0);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
+    expect((await screen.findAllByText(/^3 ?(s|秒)/)).length).toBeGreaterThan(0);
     expect(screen.queryByRole("combobox", { name: /Duration|时长/ })).not.toBeInTheDocument();
   });
 
@@ -645,7 +865,7 @@ describe("ReferenceVideoCanvas", () => {
         }),
       },
     });
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
     expect(await screen.findByText("图生视频（无参考图）档位未知")).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("reference_capability_unavailable");
     expect(screen.queryByRole("combobox", { name: /Duration|时长/ })).not.toBeInTheDocument();
@@ -662,16 +882,16 @@ describe("ReferenceVideoCanvas", () => {
         }),
       },
     });
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
     await screen.findByTestId("unit-row-E1U1");
     expect(screen.queryByRole("combobox", { name: /Duration|时长/ }) === null).toBe(fixed);
-    expect(Boolean(screen.queryByTitle(/workflow/i))).toBe(fixed);
+    expect(Boolean(screen.queryByText(/workflow/i))).toBe(fixed);
   });
 
   it("remounts the card so textarea shows the new unit's prompt when selection changes", async () => {
     vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({
       units: [mkUnit("E1U1", "hello from A"), mkUnit("E1U2", "hello from B")], unit_capabilities: {} });
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
     const taA = (await screen.findByRole("combobox")) as HTMLTextAreaElement;
     expect(taA.value).toContain("hello from A");
     fireEvent.click(screen.getByTestId("unit-row-E1U2"));
@@ -683,7 +903,7 @@ describe("ReferenceVideoCanvas", () => {
   it("adds a new unit via the store when the button is clicked", async () => {
     vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: [], unit_capabilities: {} });
     const addSpy = vi.spyOn(API, "addReferenceVideoUnit").mockResolvedValue({ unit: mkUnit("E1U1"), unit_capability: makeReferenceUnitCapability("E1U1") });
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /Add video unit|新增视频单元/ })).toBeInTheDocument(),
     );
@@ -691,50 +911,8 @@ describe("ReferenceVideoCanvas", () => {
     await waitFor(() => expect(addSpy).toHaveBeenCalled());
   });
 
-  // 主 tab：视频单元 / 脚本规划。默认 "视频单元"，即 UnitList 区域可见。
-  it("renders the main tab bar with 'units' selected by default", async () => {
-    vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: [mkUnit("E1U1")], unit_capabilities: {} });
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
-    await waitFor(() => expect(screen.getByTestId("unit-row-E1U1")).toBeInTheDocument());
-    const tabs = screen.getAllByRole("tab");
-    // 主 tab 至少 2 个；小屏 stackPreview 还会再加 2 个 sub-tab
-    expect(tabs.length).toBeGreaterThanOrEqual(2);
-    const unitsTab = screen.getByRole("tab", { name: /Video units|视频单元/ });
-    expect(unitsTab).toHaveAttribute("aria-selected", "true");
-  });
-
-  it("switches main tab between units and script plan", async () => {
-    vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: [mkUnit("E1U1")], unit_capabilities: {} });
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
-    await waitFor(() => expect(screen.getByTestId("unit-row-E1U1")).toBeInTheDocument());
-    const unitsTab = screen.getByRole("tab", { name: /Video units|视频单元/ });
-    const preprocTab = screen.getByRole("tab", { name: /Script Plan|脚本规划/ });
-    fireEvent.click(preprocTab);
-    expect(preprocTab).toHaveAttribute("aria-selected", "true");
-    expect(unitsTab).toHaveAttribute("aria-selected", "false");
-    // 脚本规划 tab 下 UnitList 不渲染
-    expect(screen.queryByTestId("unit-row-E1U1")).not.toBeInTheDocument();
-    fireEvent.click(unitsTab);
-    expect(unitsTab).toHaveAttribute("aria-selected", "true");
-    await waitFor(() => expect(screen.getByTestId("unit-row-E1U1")).toBeInTheDocument());
-  });
-
-  // 默认选中第一个 unit，避免出现 "有 units 但 editor 区域显示占位" 的不一致状态。
-  it("resets a stale selectedUnitId (e.g. from a previous episode) to the first unit of current units", async () => {
-    // 模拟切换 episode 后残留的旧 selectedUnitId
-    useReferenceVideoStore.setState({ selectedUnitId: "E99U42" });
-    vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({
-      units: [mkUnit("E1U1", "first"), mkUnit("E1U2", "second")], unit_capabilities: {} });
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
-    await waitFor(() => {
-      expect(useReferenceVideoStore.getState().selectedUnitId).toBe("E1U1");
-    });
-    const ta = (await screen.findByRole("combobox")) as HTMLTextAreaElement;
-    expect(ta.value).toContain("first");
-  });
-
-  // 脚本规划入口使用主 tab；切换后隐藏 UnitList，并 inline 渲染按集 script_plan 预览面板。
-  it("inline-renders the script_plan preview panel via the main tab", async () => {
+  // 视图由集页路由给出：脚本规划视图下不渲染 UnitList，切回视频单元视图时单元列表仍在。
+  it("renders the script plan preview instead of the unit list on the plan view", async () => {
     vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({
       units: [mkUnit("E1U1"), mkUnit("E1U2")], unit_capabilities: {} });
     vi.spyOn(API, "getScriptReview").mockResolvedValue({
@@ -750,20 +928,34 @@ describe("ReferenceVideoCanvas", () => {
       script_overwrite: null,
       content: { units: [{ unit_id: "E1U1", text: "shot text", duration_seconds: 5, source_text: "" }] },
     });
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
-    await waitFor(() => expect(screen.getByTestId("unit-row-E1U1")).toBeInTheDocument());
-    const preprocTab = screen.getByRole("tab", { name: /Script Plan|脚本规划/ });
-    fireEvent.click(preprocTab);
-    expect(preprocTab).toHaveAttribute("aria-selected", "true");
+    const { rerender } = render(<ReferenceVideoCanvas {...BOARD} view="plan" projectName="proj" episode={1} />);
     // UnitList 被隐藏，改由预览面板渲染 script_plan 结构化中间态（只读高亮文稿）
-    expect(screen.queryByTestId("unit-row-E1U1")).not.toBeInTheDocument();
     await waitFor(() => expect(screen.getByText("shot text")).toBeInTheDocument());
+    expect(screen.queryByTestId("unit-row-E1U1")).not.toBeInTheDocument();
+    rerender(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
+    await waitFor(() => expect(screen.getByTestId("unit-row-E1U1")).toBeInTheDocument());
   });
 
-  // prompt_authoring 剧本未生成时（仅 segmented）units 端点无脚本可拆、会 404：默认落 preproc tab
-  // 且不发起 units 请求，避免用户先看到一个报错的 Unit 面板。
-  it("defaults to preproc tab and skips loadUnits when hasScript is false", async () => {
-    const listSpy = vi.spyOn(API, "listReferenceVideoUnits");
+  // 默认选中第一个 unit，避免出现 "有 units 但 editor 区域显示占位" 的不一致状态。
+  it("resets a stale selectedUnitId (e.g. from a previous episode) to the first unit of current units", async () => {
+    // 模拟切换 episode 后残留的旧 selectedUnitId
+    useReferenceVideoStore.setState({ selectedUnitId: "E99U42" });
+    vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({
+      units: [mkUnit("E1U1", "first"), mkUnit("E1U2", "second")], unit_capabilities: {} });
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
+    await waitFor(() => {
+      expect(useReferenceVideoStore.getState().selectedUnitId).toBe("E1U1");
+    });
+    const ta = (await screen.findByRole("combobox")) as HTMLTextAreaElement;
+    expect(ta.value).toContain("first");
+  });
+
+  // prompt_authoring 剧本未生成时（仅 segmented）units 端点无脚本可拆、会 404：不发起 units 请求，
+  // 避免用户先看到一个报错的 Unit 面板；剧本生成后补上首次拉取。
+  it("skips loadUnits until hasScript flips true", async () => {
+    const listSpy = vi
+      .spyOn(API, "listReferenceVideoUnits")
+      .mockResolvedValue({ units: [mkUnit("E1U1")], unit_capabilities: {} });
     vi.spyOn(API, "getScriptReview").mockResolvedValue({
       episode: 1,
       content_mode: "narration",
@@ -777,35 +969,12 @@ describe("ReferenceVideoCanvas", () => {
       script_overwrite: null,
       content: { units: [{ unit_id: "E1U1", text: "shot text", duration_seconds: 5, source_text: "" }] },
     });
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} hasScript={false} />);
-    const preprocTab = await screen.findByRole("tab", { name: /Script Plan|脚本规划/ });
-    expect(preprocTab).toHaveAttribute("aria-selected", "true");
+    const { rerender } = render(
+      <ReferenceVideoCanvas {...BOARD} view="plan" projectName="proj" episode={1} hasScript={false} />,
+    );
     await waitFor(() => expect(screen.getByText("shot text")).toBeInTheDocument());
     expect(listSpy).not.toHaveBeenCalled();
-  });
-
-  it("switches to units tab and fetches once hasScript flips true", async () => {
-    vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: [mkUnit("E1U1")], unit_capabilities: {} });
-    vi.spyOn(API, "getScriptReview").mockResolvedValue({
-      episode: 1,
-      content_mode: "narration",
-      status: "pending_review",
-      fingerprint: "fp",
-      confirmed_at: null,
-      quarantine: null,
-      supported_durations: null,
-      duration_tiers: null,
-      episode_target_duration: null,
-      script_overwrite: null,
-      content: { units: [] },
-    });
-    const { rerender } = render(<ReferenceVideoCanvas projectName="proj" episode={1} hasScript={false} />);
-    const preprocTab = await screen.findByRole("tab", { name: /Script Plan|脚本规划/ });
-    expect(preprocTab).toHaveAttribute("aria-selected", "true");
-    rerender(<ReferenceVideoCanvas projectName="proj" episode={1} hasScript={true} />);
-    await waitFor(() =>
-      expect(screen.getByRole("tab", { name: /Video units|视频单元/ })).toHaveAttribute("aria-selected", "true"),
-    );
+    rerender(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} hasScript={true} />);
     await waitFor(() => expect(screen.getByTestId("unit-row-E1U1")).toBeInTheDocument());
   });
 
@@ -820,7 +989,7 @@ describe("ReferenceVideoCanvas", () => {
         resolveGen = resolve;
       }),
     );
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
     const btn = await screen.findByRole("button", { name: UNIT_GENERATE_CTA });
     // 点击前 tasks store 为空，按钮启用
     expect(btn).toBeEnabled();
@@ -829,7 +998,7 @@ describe("ReferenceVideoCanvas", () => {
     // 入队成功（202 返回）后、任务轮询写回前：动作层打乐观标记，按钮立即
     // busy 并显示 "Generating…/生成中"；请求飞行中的双击由后端去重索引兜底
     resolveGen({ task_id: "t1", deduped: false });
-    await waitFor(() => expect(screen.getByRole("button", { name: /Generating|生成中/ })).toBeDisabled());
+    await waitFor(() => expect(screen.getByRole("button", { name: /^(Generating|生成中)/ })).toBeDisabled());
     await waitFor(() => {
       expect(useAppStore.getState().toast?.text).toMatch(/Queued for generation|已加入生成队列/);
     });
@@ -858,7 +1027,7 @@ describe("ReferenceVideoCanvas", () => {
         resolveGen = resolve;
       }),
     );
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
 
     const retry = await screen.findByRole("button", { name: /Retry generation|重试生成/ });
     fireEvent.click(retry);
@@ -904,7 +1073,7 @@ describe("ReferenceVideoCanvas", () => {
         resolveGen = resolve;
       }),
     );
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
 
     const regenerate = await screen.findByRole("button", { name: /Regenerate video|重新生成视频/ });
     fireEvent.click(regenerate);
@@ -933,9 +1102,9 @@ describe("ReferenceVideoCanvas", () => {
     vi.mocked(useActiveResourceIds).mockReturnValue(new Set());
     vi.mocked(useLatestTasksByResource).mockReturnValue(new Map());
 
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
 
-    // 锚定行首，避免匹配到批量入口「批量生成视频」——它是另一条提交路径（见下一个用例）
+    // 锚定行首，避免匹配到批量入口「补齐视频」——它是另一条提交路径（见下一个用例）
     const generate = await screen.findByRole("button", { name: UNIT_GENERATE_CTA });
     expect(generate).toBeEnabled();
 
@@ -960,8 +1129,8 @@ describe("ReferenceVideoCanvas", () => {
     vi.mocked(useActiveResourceIds).mockReturnValue(new Set());
     vi.mocked(useLatestTasksByResource).mockReturnValue(new Map());
 
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
-    const batch = await screen.findByRole("button", { name: /Batch generate videos|批量生成视频/ });
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
+    const batch = await screen.findByRole("button", { name: /Fill in videos|补齐视频/ });
     await waitFor(() => expect(batch).toBeEnabled());
 
     // 渲染之后、点击之前，E1U1 已被别的入口占用
@@ -987,8 +1156,8 @@ describe("ReferenceVideoCanvas", () => {
       }));
     const unitSpy = vi.spyOn(API, "generateReferenceVideoUnit");
 
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
-    const batch = await screen.findByRole("button", { name: /Batch generate videos|批量生成视频/ });
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
+    const batch = await screen.findByRole("button", { name: /Fill in videos|补齐视频/ });
     await waitFor(() => expect(batch).toBeEnabled());
     fireEvent.click(batch);
 
@@ -1002,7 +1171,7 @@ describe("ReferenceVideoCanvas", () => {
     await waitFor(() => {
       expect(useAppStore.getState().toast?.text).toMatch(/已提交 2 个视频生成任务|Queued 2 video/);
     });
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
   });
 
   it("批量入口只提交目标单元，不提供也不携带旁白交付方式", async () => {
@@ -1011,8 +1180,8 @@ describe("ReferenceVideoCanvas", () => {
       .spyOn(API, "generateReferenceVideoBatch")
       .mockResolvedValue(mkAdmission());
 
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
-    const batch = await screen.findByRole("button", { name: /Batch generate videos|批量生成视频/ });
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
+    const batch = await screen.findByRole("button", { name: /Fill in videos|补齐视频/ });
     expect(screen.queryByRole("button", { name: /Use current TTS|使用当前 TTS/ })).not.toBeInTheDocument();
     await waitFor(() => expect(batch).toBeEnabled());
     fireEvent.click(batch);
@@ -1030,7 +1199,7 @@ describe("ReferenceVideoCanvas", () => {
     vi.mocked(useActiveResourceIds).mockReturnValue(new Set());
     vi.mocked(useLatestTasksByResource).mockReturnValue(new Map());
 
-    const { container } = render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    const { container } = render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
     await screen.findByRole("button", { name: UNIT_GENERATE_CTA });
     const input = container.querySelector<HTMLInputElement>('input[type="file"]');
     expect(input).not.toBeNull();
@@ -1059,8 +1228,8 @@ describe("ReferenceVideoCanvas", () => {
     vi.mocked(useActiveResourceIds).mockReturnValue(new Set());
     vi.mocked(useLatestTasksByResource).mockReturnValue(new Map());
 
-    const { container } = render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
-    const batch = await screen.findByRole("button", { name: /Batch generate videos|批量生成视频/ });
+    const { container } = render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
+    const batch = await screen.findByRole("button", { name: /Fill in videos|补齐视频/ });
     await waitFor(() => expect(batch).toBeEnabled());
 
     // 选中项默认是 E1U1，其预览面板的上传入口即针对该 unit
@@ -1084,8 +1253,8 @@ describe("ReferenceVideoCanvas", () => {
     vi.mocked(useActiveResourceIds).mockReturnValue(new Set());
     vi.mocked(useLatestTasksByResource).mockReturnValue(new Map());
 
-    const { container } = render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
-    const batch = await screen.findByRole("button", { name: /Batch generate videos|批量生成视频/ });
+    const { container } = render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
+    const batch = await screen.findByRole("button", { name: /Fill in videos|补齐视频/ });
     await waitFor(() => expect(batch).toBeEnabled());
 
     const input = container.querySelector<HTMLInputElement>('input[type="file"]');
@@ -1131,7 +1300,7 @@ describe("ReferenceVideoCanvas", () => {
         adjustment: "up",
       });
 
-      render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+      render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
       fireEvent.click(await screen.findByRole("button", { name: UNIT_GENERATE_CTA }));
 
       // 确认前不得入队
@@ -1162,7 +1331,7 @@ describe("ReferenceVideoCanvas", () => {
         adjustment: "up",
       });
 
-      render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+      render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
       fireEvent.click(await screen.findByRole("button", { name: UNIT_GENERATE_CTA }));
       await screen.findByRole("button", { name: CONFIRM_CTA });
 
@@ -1187,7 +1356,7 @@ describe("ReferenceVideoCanvas", () => {
         adjustment: "down",
       });
 
-      render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+      render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
       fireEvent.click(await screen.findByRole("button", { name: UNIT_GENERATE_CTA }));
 
       await screen.findByRole("button", { name: CONFIRM_CTA });
@@ -1213,7 +1382,7 @@ describe("ReferenceVideoCanvas", () => {
         adjustment: "up",
       });
 
-      render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+      render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
       fireEvent.click(await screen.findByRole("button", { name: /Regenerate|重新生成/ }));
 
       fireEvent.click(await screen.findByRole("button", { name: CONFIRM_CTA }));
@@ -1233,7 +1402,7 @@ describe("ReferenceVideoCanvas", () => {
         .mockResolvedValue({ task_id: "t1", deduped: false } as never);
       vi.spyOn(API, "precheckReferenceVideoDuration").mockRejectedValue(new Error("offline"));
 
-      render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+      render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
       fireEvent.click(await screen.findByRole("button", { name: UNIT_GENERATE_CTA }));
 
       await waitFor(() => {
@@ -1250,7 +1419,7 @@ describe("ReferenceVideoCanvas", () => {
     const BATCH_CONFIRM_CTA = /Generate at these lengths|按这些档位生成/;
 
     async function clickBatch() {
-      const batch = await screen.findByRole("button", { name: /Batch generate videos|批量生成视频/ });
+      const batch = await screen.findByRole("button", { name: /Fill in videos|补齐视频/ });
       await waitFor(() => expect(batch).toBeEnabled());
       fireEvent.click(batch);
       return batch;
@@ -1292,11 +1461,11 @@ describe("ReferenceVideoCanvas", () => {
         )
         .mockResolvedValueOnce(mkAdmission({ task_ids: ["t1", "t2", "t3"] }));
 
-      render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+      render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
       await clickBatch();
 
       const confirm = await screen.findByRole("button", { name: BATCH_CONFIRM_CTA });
-      const dialog = within(screen.getByRole("dialog"));
+      const dialog = within(screen.getByRole("alertdialog"));
       // 档位分组：秒数 × 单元数 + 合计费用；报价不全的档位不展示假合计
       expect(dialog.getByText(/^(?:8 秒|8s)$/)).toBeInTheDocument();
       expect(dialog.getByText(/2 个单元|2 units/)).toBeInTheDocument();
@@ -1312,7 +1481,7 @@ describe("ReferenceVideoCanvas", () => {
         unit_ids: ["E1U1", "E1U2", "E1U3"],
         confirmed_request_durations: { E1U1: 8, E1U2: 8, E1U3: 4 },
       });
-      await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+      await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
     });
 
     // 弹窗停留时长由用户决定，可以很长：其间别处完成的单元若按冻结清单原样重发，队列
@@ -1345,7 +1514,7 @@ describe("ReferenceVideoCanvas", () => {
         )
         .mockResolvedValueOnce(mkAdmission());
 
-      render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+      render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
       await clickBatch();
       const confirm = await screen.findByRole("button", { name: BATCH_CONFIRM_CTA });
 
@@ -1424,10 +1593,10 @@ describe("ReferenceVideoCanvas", () => {
         }),
       );
 
-      render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+      render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
       await clickBatch();
 
-      const dialog = within(await screen.findByRole("dialog"));
+      const dialog = within(await screen.findByRole("alertdialog"));
       // 全部缺口都在，不塌成第一条
       expect(dialog.getByText("引用的角色图缺失")).toBeInTheDocument();
       expect(dialog.getByText("该单元需要重新规划")).toBeInTheDocument();
@@ -1443,7 +1612,7 @@ describe("ReferenceVideoCanvas", () => {
 
       // 受阻是终局：关闭不重发
       fireEvent.click(dialog.getByRole("button", { name: /Got it|知道了/ }));
-      await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+      await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
       expect(batchSpy).toHaveBeenCalledTimes(1);
     });
 
@@ -1470,10 +1639,10 @@ describe("ReferenceVideoCanvas", () => {
         }),
       );
 
-      render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+      render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
       await clickBatch();
 
-      const dialog = within(await screen.findByRole("dialog"));
+      const dialog = within(await screen.findByRole("alertdialog"));
       // 逐个 unit 与各自原因都在，不塌成一句计数
       expect(dialog.getByText("U2")).toBeInTheDocument();
       expect(dialog.getByText("U3")).toBeInTheDocument();
@@ -1496,7 +1665,7 @@ describe("ReferenceVideoCanvas", () => {
 
       // 陈述型结局：关闭不重发
       fireEvent.click(dialog.getByRole("button", { name: /Got it|知道了/ }));
-      await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+      await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
       expect(batchSpy).toHaveBeenCalledTimes(1);
     });
 
@@ -1526,10 +1695,10 @@ describe("ReferenceVideoCanvas", () => {
         }),
       );
 
-      render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+      render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
       await clickBatch();
 
-      const dialog = within(await screen.findByRole("dialog"));
+      const dialog = within(await screen.findByRole("alertdialog"));
       // 缺口明细照旧逐个列出
       expect(dialog.getByText("U1")).toBeInTheDocument();
       expect(dialog.getByText("U2")).toBeInTheDocument();
@@ -1545,13 +1714,13 @@ describe("ReferenceVideoCanvas", () => {
       vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: [mkUnit("E1U1")], unit_capabilities: {} });
       vi.spyOn(API, "generateReferenceVideoBatch").mockRejectedValue(new Error("offline"));
 
-      render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+      render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
       await clickBatch();
 
       await waitFor(() => {
         expect(useAppStore.getState().toast?.text).toMatch(/批量生成请求失败|Batch generation request failed/);
       });
-      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
     });
   });
 
@@ -1561,9 +1730,9 @@ describe("ReferenceVideoCanvas", () => {
     ready.generated_assets.video_clip = "videos/E1U1.mp4";
     vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: [ready], unit_capabilities: {} });
 
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
 
-    const batch = await screen.findByRole("button", { name: /Batch generate videos|批量生成视频/ });
+    const batch = await screen.findByRole("button", { name: /Fill in videos|补齐视频/ });
     await waitFor(() => expect(batch).toBeDisabled());
   });
 
@@ -1571,28 +1740,51 @@ describe("ReferenceVideoCanvas", () => {
   // 历史失败不重报 / 同一失败只报一次回归均在那里覆盖），见
   // hooks/useTaskFailureNotifications.test.tsx。此处只验证回跳消费。
 
-  // 通知回跳：收到 reference_unit scroll target 时切到 units tab 并选中对应 unit。
-  it("selects the unit on a reference_unit scroll target", async () => {
+  // 通知回跳：收到 reference_unit scroll target 时切到视频单元视图并选中对应 unit，不多留一条历史。
+  it("selects the unit and asks for the units view on a reference_unit scroll target", async () => {
     vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({
       units: [mkUnit("E1U1"), mkUnit("E1U2")], unit_capabilities: {} });
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    vi.spyOn(API, "getScriptReview").mockRejectedValue(new Error("not needed"));
+    const onViewChange = vi.fn();
+    render(<ReferenceVideoCanvas view="plan" onViewChange={onViewChange} projectName="proj" episode={1} />);
     await waitFor(() => expect(useReferenceVideoStore.getState().selectedUnitId).toBe("E1U1"));
 
     useAppStore.getState().triggerScrollTo({ type: "reference_unit", id: "E1U2", route: "/episodes/1" });
 
     await waitFor(() => expect(useReferenceVideoStore.getState().selectedUnitId).toBe("E1U2"));
     expect(useAppStore.getState().scrollTarget).toBeNull();
-    expect(screen.getByRole("tab", { name: /Video units|视频单元/ })).toHaveAttribute(
-      "aria-selected",
-      "true",
-    );
+    expect(onViewChange).toHaveBeenCalledWith("board", { replace: true });
+  });
+
+  it("有未保存修改时定位到单元只询问一次：继续编辑什么都不变，放弃后切到视频单元视图并选中", async () => {
+    vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({
+      units: [mkUnit("E1U1"), mkUnit("E1U2")], unit_capabilities: {} });
+    vi.spyOn(API, "getScriptReview").mockRejectedValue(new Error("not needed"));
+    const saveNothing = async () => true;
+    /** 画布之外另一个带着未保存修改的编辑单元。 */
+    function OtherDirtyUnit() {
+      useLeaveGuard({ dirty: true, save: saveNothing });
+      return null;
+    }
+    const onViewChange = vi.fn();
+    render(<><OtherDirtyUnit /><ReferenceVideoCanvas view="plan" onViewChange={onViewChange} projectName="proj" episode={1} /></>);
+    await waitFor(() => expect(useReferenceVideoStore.getState().selectedUnitId).toBe("E1U1"));
+
+    act(() => useAppStore.getState().triggerScrollTo({ type: "reference_unit", id: "E1U2", route: "/episodes/1" }));
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "继续编辑" }));
+    expect(onViewChange).not.toHaveBeenCalled();
+    expect(useReferenceVideoStore.getState().selectedUnitId).toBe("E1U1");
+
+    act(() => useAppStore.getState().triggerScrollTo({ type: "reference_unit", id: "E1U2", route: "/episodes/1" }));
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "放弃修改" }));
+    expect(onViewChange).toHaveBeenCalledWith("board", { replace: true });
+    expect(useReferenceVideoStore.getState().selectedUnitId).toBe("E1U2");
   });
 
   it("窄屏下带起始时间的单元链接把预览子页签切到前台", async () => {
-    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ width: 600 } as DOMRect);
     vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({
       units: [mkUnit("E1U1"), mkUnit("E1U2")], unit_capabilities: {} });
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
     await waitFor(() => expect(useReferenceVideoStore.getState().selectedUnitId).toBe("E1U1"));
     const previewTab = screen.getByRole("tab", { name: /^(Video|视频)$/ });
     expect(previewTab).toHaveAttribute("aria-selected", "false");
@@ -1616,7 +1808,7 @@ describe("ReferenceVideoCanvas", () => {
         resolveList = resolve;
       }),
     );
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
     // 加载中（fetch 挂起，loading=true）下发一个已过期的 target；act 确定性 flush
     // 回跳 effect（避免固定延时——这是否定性断言，waitFor 首检即真无法证明 target
     // 持续存在，setTimeout 又可能在 effect 跑完前就断言导致漏判 bug）。
@@ -1642,7 +1834,7 @@ describe("ReferenceVideoCanvas", () => {
   // 过期 target 也应被一次性定时器清除，不会永久残留 store。
   it("clears an unresolvable reference_unit target after expiry without further updates", async () => {
     vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: [mkUnit("E1U1")], unit_capabilities: {} });
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
     await waitFor(() => expect(useReferenceVideoStore.getState().selectedUnitId).toBe("E1U1"));
     // 目标 unit 不在列表中，给一个略长的过期窗口降低脆弱性
     act(() => {
@@ -1665,7 +1857,7 @@ describe("ReferenceVideoCanvas", () => {
     const listSpy = vi
       .spyOn(API, "listReferenceVideoUnits")
       .mockResolvedValue({ units: [mkUnit("E1U1")], unit_capabilities: {} });
-    render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+    render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
     await waitFor(() => expect(listSpy).toHaveBeenCalledTimes(1));
 
     act(() => {
@@ -1697,7 +1889,7 @@ describe("ReferenceVideoCanvas", () => {
         refreshProject: vi.fn().mockResolvedValue({ status: "ok" }),
       } as never);
       vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: [staleUnit()], unit_capabilities: {} });
-      render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+      render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
     }
 
     it("关闭时写回角色自己的 voice_updated_at，而不是本机当前时间", async () => {
@@ -1743,7 +1935,7 @@ describe("ReferenceVideoCanvas", () => {
         refreshProject,
       } as never);
       vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: [staleUnit()], unit_capabilities: {} });
-      render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+      render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
 
       const dismiss = await screen.findByRole("button", { name: /Got it|知道了/ });
       fireEvent.click(dismiss);
@@ -1762,7 +1954,7 @@ describe("ReferenceVideoCanvas", () => {
         refreshProject: vi.fn().mockResolvedValue({ status: "ok" }),
       } as never);
       vi.spyOn(API, "listReferenceVideoUnits").mockResolvedValue({ units: [staleUnit()], unit_capabilities: {} });
-      render(<ReferenceVideoCanvas projectName="proj" episode={1} />);
+      render(<ReferenceVideoCanvas {...BOARD} projectName="proj" episode={1} />);
 
       await screen.findAllByText("U1");
       expect(screen.queryByRole("button", { name: /Got it|知道了/ })).not.toBeInTheDocument();

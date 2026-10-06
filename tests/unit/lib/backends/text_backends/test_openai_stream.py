@@ -79,7 +79,7 @@ async def test_all_structured_fallback_requests_stream(fallback):
     text = '{"name":"张三","age":30}'
     responses = [_schema_rejected()]
     if fallback == "md_json":
-        responses.append(_sse_response(text))
+        responses.extend(_sse_response(text) for _ in range(3))
     responses.append(_sse_response(text, tool=fallback == "tools"))
     schema = Person.model_json_schema() if fallback == "dict" else Person
     with capture_http() as router:
@@ -90,7 +90,7 @@ async def test_all_structured_fallback_requests_stream(fallback):
     assert json.loads(result.text) == {"name": "张三", "age": 30}
     assert all(request_json(call.request)["stream"] is True for call in route.calls)
     assert route.call_count == len(responses)
-    assert (result.input_tokens, result.output_tokens) == ((20, 10) if fallback == "md_json" else (10, 5))
+    assert (result.input_tokens, result.output_tokens) == ((40, 20) if fallback == "md_json" else (10, 5))
 
 
 async def test_streamed_validation_retry_and_native_usage_are_preserved():

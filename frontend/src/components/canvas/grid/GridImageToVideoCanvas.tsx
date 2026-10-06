@@ -1,9 +1,14 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Sparkles, Loader2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { EpisodeHeader } from "../timeline/EpisodeHeader";
+import { Button } from "@/components/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { BatchFillButton, useBatchGap } from "../episode-page/BatchFillButton";
+import { EpisodeHeaderActions } from "../episode-page/EpisodeHeaderActions";
+import type { EpisodeCanvasContext } from "../episode-page/EpisodePage";
 import { ScriptReviewGate } from "../timeline/ScriptReviewGate";
 import { PromptAuthoringButton } from "../shared/PromptAuthoringButton";
+import { RetainedEditUnit } from "@/components/shared/edit-unit/RetainedEditUnit";
 import { ShotSplitView } from "../timeline/ShotSplitView";
 import { EmptyScriptState } from "../timeline/EmptyScriptState";
 import { StoryboardBatchDialog } from "../timeline/StoryboardBatchDialog";
@@ -11,10 +16,8 @@ import type { InsertShotHandler } from "../timeline/ShotStructureActions";
 import { GridPreviewView } from "./GridPreviewView";
 import { useDemoWorkbench } from "@/onboarding/use-demo-workbench";
 import { useAppStore } from "@/stores/app-store";
-import { useCostStore } from "@/stores/cost-store";
-import { useEpisodeSurfaceRequest } from "@/stores/episode-surface-store";
 import { useActiveResourceIds, useHasActiveTaskForScriptFile } from "@/stores/tasks-store";
-import { getScriptItemId, sumItemDuration } from "@/utils/script-shape";
+import { getScriptItemId } from "@/utils/script-shape";
 import type { DurationOutOfRangeReason } from "@/hooks/useModelCapabilities";
 import type {
   EpisodeScript,
@@ -26,12 +29,10 @@ import type {
 } from "@/types";
 
 type Segment = NarrationSegment | DramaScene;
-type GridTab = "preprocessing" | "grid_preview" | "units";
 
-interface GridImageToVideoCanvasProps {
+interface GridImageToVideoCanvasProps extends EpisodeCanvasContext {
   projectName: string;
   episode: number;
-  episodeTitle?: string;
   hasDraft?: boolean;
   episodeScript: EpisodeScript | null;
   scriptFile?: string;
@@ -45,12 +46,8 @@ interface GridImageToVideoCanvasProps {
   capabilitiesLoading?: boolean;
   /** 已保存时长越界的成因判定；缺省时 ShotDetail 退回不区分成因的通用警告文案。 */
   durationWarningReason?: (seconds: number) => DurationOutOfRangeReason | null;
-  onUpdatePrompt?: (
-    segmentId: string,
-    fieldOrPatch: string | Record<string, unknown>,
-    value?: unknown,
-    scriptFile?: string,
-  ) => void | Promise<void>;
+  /** 保存分镜字段：失败时抛错；resolve 为本地剧本是否已刷新到保存后的内容。 */
+  onUpdatePrompt?: (segmentId: string, patch: Record<string, unknown>, scriptFile?: string) => Promise<boolean>;
   onGenerateStoryboard?: (segmentId: string, scriptFile?: string) => void;
   onGenerateVideo?: (segmentId: string, scriptFile?: string) => void | Promise<void>;
   onGenerateNarration?: (segmentId: string, scriptFile?: string) => void;
@@ -68,14 +65,13 @@ interface GridImageToVideoCanvasProps {
   onInsertShot?: (afterId: string | null, novelText: string | undefined, scriptFile?: string) => Promise<boolean>;
   /** 移除分镜，resolve 为是否成功 */
   onRemoveShot?: (itemId: string, scriptFile?: string) => Promise<boolean>;
-  onSaveTitle?: (next: string) => Promise<void>;
-  canEditTitle?: boolean;
 }
 
 export function GridImageToVideoCanvas({
   projectName,
   episode,
-  episodeTitle,
+  view,
+  onViewChange,
   hasDraft,
   episodeScript,
   scriptFile,
@@ -98,8 +94,6 @@ export function GridImageToVideoCanvas({
   onMoveShot,
   onInsertShot,
   onRemoveShot,
-  onSaveTitle,
-  canEditTitle,
 }: GridImageToVideoCanvasProps) {
   const { t } = useTranslation("dashboard");
   const contentMode = projectData?.content_mode ?? "narration";
@@ -110,29 +104,10 @@ export function GridImageToVideoCanvas({
     contentMode === "narration" ? "narration" : contentMode === "ad" ? null : "drama";
 
   const hasScript = Boolean(episodeScript);
-  const showTabs = Boolean(hasDraft);
-  const defaultTab: GridTab = hasScript ? "units" : "preprocessing";
-  const [activeTab, setActiveTab] = useState<GridTab>(defaultTab);
   const [videoBatchOpen, setVideoBatchOpen] = useState(false);
   const demoReadOnly = useDemoWorkbench();
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- 剧本加载完成后切到 units 标签页，由 hasScript 变化驱动
-    if (hasScript) setActiveTab("units");
-  }, [hasScript]);
-
-  useEpisodeSurfaceRequest(projectName, episode, "script_plan", () => {
-    if (showTabs) setActiveTab("preprocessing");
-  });
-
-  const episodeCost = useCostStore((s) =>
-    episodeScript ? s.getEpisodeCost(episodeScript.episode) : undefined,
-  );
-  const debouncedFetch = useCostStore((s) => s.debouncedFetch);
-  useEffect(() => {
-    if (!projectName) return;
-    debouncedFetch(projectName);
-  }, [projectName, episodeScript?.episode, debouncedFetch]);
+  const videoGap = useBatchGap(projectName, episode, "videos", "video");
+  const narrationGap = useBatchGap(projectName, episode, "narration", "tts");
 
   const rawAspect =
     typeof projectData?.aspect_ratio === "string"
@@ -199,34 +174,15 @@ export function GridImageToVideoCanvas({
 
   if (!projectData || (!episodeScript && !hasDraft)) {
     return (
-      <div
-        className="flex h-full items-center justify-center"
-        style={{ color: "var(--color-text-4)" }}
-      >
+      <div className="flex h-full items-center justify-center text-muted-foreground">
         {t("select_episode_hint")}
       </div>
     );
   }
 
-  const totalDuration = sumItemDuration(segments);
-
-  const currentEpisodeMeta = projectData?.episodes?.find((e) => e.episode === episode);
-  const epMeta =
-    currentEpisodeMeta ??
-    ({
-      episode,
-      title: episodeTitle ?? episodeScript?.title ?? "",
-      script_file: scriptFile ?? "",
-      item_count: segments.length,
-      duration_seconds: totalDuration,
-      status: hasScript ? "in_production" : "draft",
-    } as const);
-
-  const handleUpdatePrompt = (
-    segId: string,
-    fieldOrPatch: string | Record<string, unknown>,
-    value?: unknown,
-  ) => onUpdatePrompt?.(segId, fieldOrPatch, value, scriptFile);
+  const handleUpdatePrompt = onUpdatePrompt
+    ? (segId: string, patch: Record<string, unknown>) => onUpdatePrompt(segId, patch, scriptFile)
+    : undefined;
   const handleGenSb = (segId: string) => onGenerateStoryboard?.(segId, scriptFile);
   const handleGenVid = (segId: string) => onGenerateVideo?.(segId, scriptFile);
   const handleGenNarration = onGenerateNarration
@@ -244,111 +200,52 @@ export function GridImageToVideoCanvas({
   const handleRemoveShot =
     onRemoveShot && !demoReadOnly ? (itemId: string) => onRemoveShot(itemId, scriptFile) : undefined;
 
-  const renderTabButton = (key: GridTab, label: string, disabled = false) => (
-    <button
-      type="button"
-      role="tab"
-      aria-selected={activeTab === key}
-      onClick={() => !disabled && setActiveTab(key)}
-      disabled={disabled}
-      className="focus-ring relative px-3.5 py-2.5 text-[12.5px] font-medium transition-colors disabled:cursor-not-allowed"
-      style={{
-        color:
-          activeTab === key
-            ? "var(--color-text)"
-            : disabled
-              ? "var(--color-text-4)"
-              : "var(--color-text-3)",
-      }}
-    >
-      {label}
-      {activeTab === key && (
-        <span
-          aria-hidden="true"
-          className="absolute -bottom-px left-2.5 right-2.5 h-0.5 rounded"
-          style={{ background: "var(--color-accent)" }}
-        />
-      )}
-    </button>
-  );
-
   return (
     <div className="flex h-full flex-col overflow-hidden">
-      <EpisodeHeader
-        ep={epMeta}
-        segmentCount={segments.length}
-        totalDuration={totalDuration}
-        episodeCost={episodeCost ?? undefined}
-        onSaveTitle={onSaveTitle}
-        canEditTitle={canEditTitle}
-      />
-
-      <div
-        role="tablist"
-        aria-label={t("grid_canvas_tab_aria")}
-        className="flex items-center gap-0.5 px-5"
-        style={{
-          borderBottom: "1px solid var(--color-hairline)",
-          background: "oklch(0.19 0.012 250 / 0.5)",
-        }}
-      >
-        {showTabs && renderTabButton("preprocessing", t("tab_script_plan"))}
-        {renderTabButton("grid_preview", t("tab_grid_preview"))}
-        {renderTabButton("units", t("tab_timeline"), !hasScript)}
-        <span className="flex-1" />
-
-        {activeTab === "grid_preview" && hasScript && onGenerateGrid && scriptFile && (
-          <div className="mr-1 inline-flex items-center gap-1.5">
-            <button
-              type="button"
-              onClick={() => void handleGenerateAllGrids()}
-              disabled={generatingAllGrids}
-              className="sv-navbtn inline-flex items-center gap-1.5"
+      {view === "grid" && hasScript && onGenerateGrid && scriptFile && (
+        <EpisodeHeaderActions>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void handleGenerateAllGrids()}
+                  disabled={generatingAllGrids}
+                />
+              }
             >
               {generatingAllGrids ? (
-                <Loader2 className="h-3 w-3 animate-spin" />
+                <Loader2 aria-hidden data-icon="inline-start" className="animate-spin" />
               ) : (
-                <Sparkles className="h-3 w-3" />
+                <Sparkles aria-hidden data-icon="inline-start" />
               )}
-              <span>{generatingAllGrids ? t("submitting") : t("generate_all_grids")}</span>
-            </button>
-          </div>
-        )}
+              {generatingAllGrids ? t("submitting") : t("generate_all_grids")}
+            </TooltipTrigger>
+            <TooltipContent>{t("generate_all_grids_hint")}</TooltipContent>
+          </Tooltip>
+        </EpisodeHeaderActions>
+      )}
 
-        {activeTab === "units" && hasScript && (
-          <div className="mr-1 inline-flex items-center gap-1.5">
-            <PromptAuthoringButton
-              projectName={projectName}
-              episode={episode}
-              scope="pending"
-              className="sv-navbtn gap-1.5"
+      {view === "board" && hasScript && (
+        <EpisodeHeaderActions>
+          <PromptAuthoringButton projectName={projectName} episode={episode} scope="pending" />
+          <BatchFillButton
+            kind="videos"
+            count={videoGap}
+            disabled={demoReadOnly}
+            onClick={() => setVideoBatchOpen(true)}
+          />
+          {contentMode === "narration" && onGenerateEpisodeNarration && (
+            <BatchFillButton
+              kind="narration"
+              count={narrationGap}
+              disabled={narrationBatchBusy}
+              onClick={() => onGenerateEpisodeNarration(scriptFile)}
             />
-            <button
-              type="button"
-              className="sv-navbtn inline-flex items-center gap-1.5"
-              disabled={demoReadOnly}
-              onClick={() => setVideoBatchOpen(true)}
-              title={t("batch_generate_videos")}
-              aria-label={t("batch_generate_videos")}
-            >
-              <Sparkles className="h-3 w-3" />
-              <span>{t("batch_generate_videos")}</span>
-            </button>
-            {contentMode === "narration" && onGenerateEpisodeNarration && (
-              <button
-                type="button"
-                className="sv-navbtn inline-flex items-center gap-1.5"
-                disabled={narrationBatchBusy}
-                onClick={() => onGenerateEpisodeNarration(scriptFile)}
-                title={t("batch_generate_narration")}
-              >
-                <Sparkles className="h-3 w-3" />
-                <span>{t("batch_generate_narration")}</span>
-              </button>
-            )}
-          </div>
-        )}
-      </div>
+          )}
+        </EpisodeHeaderActions>
+      )}
 
       {videoBatchOpen && (
         <StoryboardBatchDialog
@@ -360,8 +257,8 @@ export function GridImageToVideoCanvas({
       )}
 
       <div className="min-h-0 flex-1 overflow-hidden">
-        {activeTab === "preprocessing" && hasDraft && editorContentMode ? (
-          <div className="h-full overflow-y-auto p-4">
+        <RetainedEditUnit identity={episodeScript && segments.length > 0 ? "shots" : "empty"} message={t("shot_externally_removed")} value={view === "plan" && hasDraft && editorContentMode ? (
+          <div className="relative h-full overflow-y-auto p-4">
             <ScriptReviewGate
               key={`${projectName}:${episode}`}
               projectName={projectName}
@@ -371,10 +268,10 @@ export function GridImageToVideoCanvas({
               durationOptions={planDurationOptions}
               durationEndpointFixed={durationEndpointFixed}
               durationWarningReason={durationWarningReason}
-              onOpenTimeline={hasScript ? () => setActiveTab("units") : undefined}
+              onOpenTimeline={hasScript ? () => onViewChange("board") : undefined}
             />
           </div>
-        ) : activeTab === "grid_preview" && editorContentMode ? (
+        ) : view === "grid" && editorContentMode ? (
           <GridPreviewView
             projectName={projectName}
             episode={episode}
@@ -414,7 +311,9 @@ export function GridImageToVideoCanvas({
             contentMode={editorContentMode}
             onInsert={handleInsertShot}
           />
-        ) : null}
+        ) : null}>
+          {(content) => content}
+        </RetainedEditUnit>
       </div>
     </div>
   );

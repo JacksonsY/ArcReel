@@ -10,10 +10,6 @@ vi.mock("../timeline/ScriptReviewGate", async () => {
   const { scriptReviewGateMock } = await import("@/__mocks__/ScriptReviewGate");
   return scriptReviewGateMock();
 });
-vi.mock("../timeline/EpisodeHeader", async () => {
-  const { episodeHeaderMock } = await import("@/__mocks__/EpisodeHeader");
-  return episodeHeaderMock();
-});
 vi.mock("./GridPreviewView", () => ({
   GridPreviewView: () => <div data-testid="grid-preview-view" />,
 }));
@@ -48,6 +44,9 @@ vi.mock("../timeline/ShotSplitView", () => ({
     </>
   ),
 }));
+
+/** 集页路由给画布的视图：缺省停在分镜视图。 */
+const BOARD = { view: "board", onViewChange: () => {} } as const;
 
 function makeProjectData(): ProjectData {
   return {
@@ -92,6 +91,8 @@ describe("GridImageToVideoCanvas", () => {
       models: { image: { provider: "p", model: "m" }, video: { provider: "p", model: "m" } },
       episodes: [],
       project_totals: { estimate: {}, actual: {} },
+      unpriced: { estimate: [], actual: [] },
+      missing_local_calls: false,
     });
   });
 
@@ -99,6 +100,7 @@ describe("GridImageToVideoCanvas", () => {
     const onGenerateVideo = vi.fn();
     render(
       <GridImageToVideoCanvas
+        {...BOARD}
         projectName="demo"
         episode={1}
         hasDraft
@@ -117,6 +119,7 @@ describe("GridImageToVideoCanvas", () => {
   it("forwards endpoint-fixed duration to grid shot controls", () => {
     render(
       <GridImageToVideoCanvas
+        {...BOARD}
         projectName="demo" episode={1} hasDraft episodeScript={makeScript()}
         scriptFile="scripts/episode_1.json" projectData={makeProjectData()}
         durationEndpointFixed
@@ -134,6 +137,7 @@ describe("GridImageToVideoCanvas", () => {
     const onGenerateStoryboard = vi.fn();
     render(
       <GridImageToVideoCanvas
+        {...BOARD}
         projectName="demo" episode={1} episodeScript={makeScript()}
         scriptFile="scripts/episode_1.json" projectData={makeProjectData()}
         onMoveShot={onMoveShot} onInsertShot={onInsertShot} onRemoveShot={onRemoveShot}

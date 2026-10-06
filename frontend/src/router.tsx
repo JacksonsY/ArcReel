@@ -13,6 +13,8 @@ import { AssetLibraryPage } from "@/components/pages/AssetLibraryPage";
 import { LoginPage } from "@/components/pages/LoginPage";
 import { NotFoundPage } from "@/components/pages/NotFoundPage";
 import { ToastOverlay } from "@/components/layout/ToastOverlay";
+import { LeaveGuardProvider } from "@/components/shared/edit-unit/LeaveGuard";
+import { useTrackReturnTo } from "@/components/shared/page-shell/return-to";
 import { OnboardingTour } from "@/onboarding/OnboardingTour";
 import {
   buildDemoProjectData,
@@ -35,6 +37,12 @@ import {
   WORKSPACE_ROUTE_SETTINGS,
 } from "@/app-routes";
 
+/** 记录最近停留的应用页面，全局设置与资产库的「返回」据此回到进入之前的位置。 */
+function ReturnToTracker() {
+  useTrackReturnTo();
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // ConfigStatusLoader — 登录后集中拉取一次配置完整性状态
 // ---------------------------------------------------------------------------
@@ -55,12 +63,7 @@ function ConfigStatusLoader() {
     const tick = async () => {
       await useConfigStatusStore.getState().fetch();
       if (cancelled) return;
-      const configStatus = useConfigStatusStore.getState();
-      if (configStatus.initialized) {
-        useAppStore
-          .getState()
-          .initializeAssistantPanel(configStatus.isEmbeddedAgentConfigured);
-      } else if (attempts < 5) {
+      if (!useConfigStatusStore.getState().initialized && attempts < 5) {
         attempts += 1;
         timer = setTimeout(() => void tick(), 800 * attempts);
       }
@@ -88,7 +91,7 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
       <div
         role="status"
         aria-live="polite"
-        className="flex h-screen items-center justify-center gap-2 bg-bg text-[13px] text-text-4"
+        className="flex h-screen items-center justify-center gap-2 bg-background text-[13px] text-muted-foreground"
       >
         <Loader2 aria-hidden className="h-4 w-4 motion-safe:animate-spin" />
         <span>{t("loading")}</span>
@@ -193,9 +196,11 @@ function StudioWorkspace() {
 // ---------------------------------------------------------------------------
 
 export function AppRoutes() {
+  // 离开拦截包住全部路由：未保存修改在任何应用内跳转前先询问
   return (
-    <>
+    <LeaveGuardProvider>
       <ConfigStatusLoader />
+      <ReturnToTracker />
       <OnboardingTour />
       <Switch>
         {/* Login page */}
@@ -246,7 +251,7 @@ export function AppRoutes() {
           </AuthGuard>
         </Route>
 
-        {/* Studio workspace (three-column layout) */}
+        {/* Studio workspace (three-column layout)；未注册的子路径由画布内层 Switch 的兜底路由显示空状态 */}
         <Route path={`${ROUTE_APP_PROJECTS}/:projectName`} nest>
           <AuthGuard>
             <StudioWorkspace />
@@ -259,6 +264,6 @@ export function AppRoutes() {
         </Route>
       </Switch>
       <ToastOverlay />
-    </>
+    </LeaveGuardProvider>
   );
 }

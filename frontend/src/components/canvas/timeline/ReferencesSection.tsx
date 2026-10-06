@@ -1,18 +1,19 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Edit3, MapPin, Plus, Puzzle, User } from "lucide-react";
-import { AvatarStack } from "@/components/ui/AvatarStack";
-import { ClueStack } from "@/components/ui/ClueStack";
+import { AlertTriangle, Edit3, MapPin, Plus, Puzzle, User } from "lucide-react";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { TooltipIconButton } from "./TooltipIconButton";
+import { AvatarStack } from "@/components/canvas/timeline/AvatarStack";
+import { ClueStack } from "@/components/canvas/timeline/ClueStack";
 import {
   SegmentRefsEditModal,
   type SegmentRefsChanges,
-} from "@/components/ui/SegmentRefsEditModal";
+} from "@/components/canvas/timeline/SegmentRefsEditModal";
 import { useProjectsStore } from "@/stores/projects-store";
 import type { Character, PlanNewAsset } from "@/types";
 import { planReferenceCandidates } from "@/utils/plan-new-assets";
 import { resolveCharacterForm } from "@/utils/reference-mentions";
 import { charactersFieldFor, type EditorContentMode } from "@/utils/script-shape";
-import { WARM_TONE } from "@/utils/severity-tone";
 
 interface ReferencesSectionProps {
   projectName: string;
@@ -113,18 +114,7 @@ export function ReferencesSection({
     setOpen(true);
   };
 
-  const eyebrow = (
-    <div
-      className="text-[10.5px] font-bold uppercase"
-      style={{
-        color: "var(--color-text-4)",
-        letterSpacing: "1px",
-        fontFamily: "var(--font-mono)",
-      }}
-    >
-      {t("eyebrow_segment_refs")}
-    </div>
-  );
+  const heading = <h3 className="text-xs font-medium text-muted-foreground">{t("eyebrow_segment_refs")}</h3>;
 
   const modal = open ? (
     <SegmentRefsEditModal
@@ -146,108 +136,67 @@ export function ReferencesSection({
 
   if (isEmpty) {
     return (
-      <div>
-        <div className="mb-2 flex items-center justify-between">{eyebrow}</div>
+      <section className="flex flex-col gap-2">
+        <div className="flex min-h-7 items-center">{heading}</div>
         <button
           type="button"
           onClick={openModal}
           disabled={disabled}
-          title={disabled ? disabledHint : t("references_add_cta")}
-          className="focus-ring group flex w-full items-center gap-2.5 rounded-md px-3 py-2.5 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-          style={{
-            border: "1px dashed var(--color-hairline)",
-            color: "var(--color-text-4)",
-            background: "transparent",
-          }}
-          onMouseEnter={(e) => {
-            if (disabled) return;
-            e.currentTarget.style.borderColor = "var(--color-hairline-strong)";
-            e.currentTarget.style.borderStyle = "solid";
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.borderColor = "var(--color-hairline)";
-            e.currentTarget.style.borderStyle = "dashed";
-          }}
+          title={disabled ? disabledHint : undefined}
+          className="focus-ring flex w-full items-center gap-2.5 rounded-lg border border-dashed border-border px-3 py-2.5 text-left text-muted-foreground transition-colors hover:border-solid hover:border-input disabled:pointer-events-none disabled:opacity-50"
         >
-          <span className="flex-1 truncate text-[12px]">
-            {t("references_empty_full")}
-          </span>
-          <span
-            className="num inline-flex shrink-0 items-center gap-1 text-[11px]"
-            style={{ color: "var(--color-accent-2)" }}
-          >
-            <Plus className="h-3 w-3" aria-hidden="true" />
+          <span className="flex-1 truncate text-xs">{t("references_empty_full")}</span>
+          <span className="inline-flex shrink-0 items-center gap-1 text-xs text-primary">
+            <Plus className="size-3" aria-hidden="true" />
             <span>{t("references_add_cta")}</span>
           </span>
         </button>
         {modal}
-      </div>
+      </section>
     );
   }
 
   return (
-    <div>
-      <div className="mb-2 flex items-center gap-2">
-        {eyebrow}
+    <section className="flex flex-col gap-2">
+      <div className="flex min-h-7 items-center gap-2">
+        {heading}
         {totalStale > 0 && (
-          <span
-            className="num inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px]"
-            style={{
-              background: WARM_TONE.soft,
-              border: `1px solid ${WARM_TONE.ring}`,
-              color: WARM_TONE.color,
-            }}
-            title={t("segment_refs_stale_hint")}
-          >
-            <span aria-hidden="true">⚠</span>
-            <span>{t("segment_refs_stale_badge", { count: totalStale })}</span>
-          </span>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- 失效说明只在提示里，须能用键盘聚焦打开；它没有可执行的动作，不渲染为 button
+                <span tabIndex={0} className="num focus-ring inline-flex items-center gap-1 rounded-full bg-warn/10 px-1.5 py-0.5 text-xs text-warn ring-1 ring-warn/30" />
+              }
+            >
+              <AlertTriangle aria-hidden className="size-3" />
+              {t("segment_refs_stale_badge", { count: totalStale })}
+              <span className="sr-only">{t("segment_refs_stale_hint")}</span>
+            </TooltipTrigger>
+            <TooltipContent>{t("segment_refs_stale_hint")}</TooltipContent>
+          </Tooltip>
         )}
         <span className="flex-1" />
-        <button
-          type="button"
-          onClick={openModal}
+        <TooltipIconButton
+          label={t("segment_refs_edit_button")}
+          hint={disabledHint}
           disabled={disabled}
-          title={disabled ? disabledHint : t("segment_refs_edit_button")}
-          aria-label={t("segment_refs_edit_button")}
-          className="focus-ring inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-          style={{
-            color: "var(--color-text-3)",
-            background: "transparent",
-          }}
-          onMouseEnter={(e) => {
-            if (disabled) return;
-            e.currentTarget.style.color = "var(--color-accent-2)";
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.color = "var(--color-text-3)";
-          }}
+          onClick={openModal}
+          size="icon-xs"
         >
-          <Edit3 className="h-3 w-3" aria-hidden="true" />
-        </button>
+          <Edit3 aria-hidden />
+        </TooltipIconButton>
       </div>
 
       <button
         type="button"
         onClick={openModal}
         disabled={disabled}
-        title={disabled ? disabledHint : t("segment_refs_edit_button")}
-        className="focus-ring group flex w-full flex-wrap items-center gap-x-3 gap-y-1.5 rounded-md px-3 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-60"
-        style={{
-          border: "1px solid var(--color-hairline-soft)",
-          background: "oklch(0.20 0.011 265 / 0.4)",
-        }}
-        onMouseEnter={(e) => {
-          if (disabled) return;
-          e.currentTarget.style.borderColor = "var(--color-hairline-strong)";
-        }}
-        onMouseLeave={(e) => {
-          e.currentTarget.style.borderColor = "var(--color-hairline-soft)";
-        }}
+        title={disabled ? disabledHint : undefined}
+        className="focus-ring flex w-full flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg border border-border/50 bg-muted/30 px-3 py-2 text-left transition-colors hover:border-input disabled:cursor-not-allowed"
       >
         {characterNames.length > 0 && (
           <Group
-            icon={<User className="h-3 w-3" aria-hidden="true" />}
+            icon={<User className="size-3" aria-hidden="true" />}
             label={t("references_badge_character")}
             count={characterNames.length}
           >
@@ -261,7 +210,7 @@ export function ReferencesSection({
         )}
         {sceneNames.length > 0 && (
           <Group
-            icon={<MapPin className="h-3 w-3" aria-hidden="true" />}
+            icon={<MapPin className="size-3" aria-hidden="true" />}
             label={t("references_badge_scene")}
             count={sceneNames.length}
           >
@@ -277,7 +226,7 @@ export function ReferencesSection({
         )}
         {propNames.length > 0 && (
           <Group
-            icon={<Puzzle className="h-3 w-3" aria-hidden="true" />}
+            icon={<Puzzle className="size-3" aria-hidden="true" />}
             label={t("references_badge_prop")}
             count={propNames.length}
           >
@@ -294,7 +243,7 @@ export function ReferencesSection({
       </button>
 
       {modal}
-    </div>
+    </section>
   );
 }
 
@@ -312,15 +261,10 @@ function Group({
   return (
     <div className="flex items-center gap-2">
       {children}
-      <span
-        className="inline-flex items-center gap-1 text-[11px]"
-        style={{ color: "var(--color-text-3)" }}
-      >
-        <span style={{ color: "var(--color-text-4)" }}>{icon}</span>
+      <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+        {icon}
         <span>{label}</span>
-        <span className="num" style={{ color: "var(--color-text-2)" }}>
-          {count}
-        </span>
+        <span className="num text-subtle-foreground">{count}</span>
       </span>
     </div>
   );

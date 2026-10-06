@@ -49,13 +49,16 @@ CAPABILITY_FAILURE_CODES: frozenset[str] = frozenset(
         "video_reference_images_unreadable",
         "video_reference_images_unsupported",
         "video_reference_images_with_frames_unsupported",
+        "video_reference_resolution_unsupported",
         "video_reference_audio_duration_exceeded",
         "video_reference_audio_exceeded",
         "video_reference_audio_format_unsupported",
         "video_reference_audio_slots_insufficient",
         "video_reference_audio_unreadable",
         "video_reference_audio_unsupported",
+        "video_aspect_ratio_not_supported",
         "video_resolution_duration_unsupported",
+        "video_resolution_not_supported",
         "video_start_image_unreadable",
     }
 )
@@ -119,6 +122,8 @@ FAILURE_CODE_KEYS: dict[str, str] = {
     # 译文模板：它不该被翻译，读侧按独立字段原样展示。
     "provider_rejected": "task_fail_provider_rejected",
     "dispatch_provider_requeue_failed": "task_fail_dispatch_provider_requeue_failed",
+    # 项目在任务执行期间被删除：任务放弃落盘，见 lib.project.task_project_claim。
+    "project_deleted_during_task": "task_fail_project_deleted_during_task",
     "restart_lost_image": "task_fail_restart_lost_image",
     "restart_lost_audio": "task_fail_restart_lost_audio",
     "restart_lost_text": "task_fail_restart_lost_text",

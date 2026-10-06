@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Router } from "wouter";
 import { memoryLocation } from "wouter/memory-location";
@@ -16,16 +16,13 @@ vi.mock("@/components/usage/UsageHeaderEntry", () => ({
   ),
 }));
 
-vi.mock("./WorkspaceNotificationsDrawer", () => ({
-  WorkspaceNotificationsDrawer: ({ open }: { open: boolean }) =>
-    open ? <div data-testid="notifications-drawer" /> : null,
-}));
-
 /** 打开「导出项目」弹窗并选择归档范围。 */
 async function openExportScope(option: "current" | "full") {
   screen.getByRole("button", { name: "导出项目归档" }).click();
   const name = option === "current" ? /仅当前版本/ : /全部数据/;
-  (await screen.findByRole("button", { name })).click();
+  const dialog = await screen.findByRole("dialog", { name: "选择导出范围" });
+  fireEvent.click(within(dialog).getByRole("radio", { name }));
+  fireEvent.click(within(dialog).getByRole("button", { name: "导出" }));
 }
 
 function renderHeader(path = "/characters") {
@@ -81,23 +78,6 @@ describe("GlobalHeader", () => {
     expect(screen.queryByText("halou-92d19a04")).not.toBeInTheDocument();
   });
 
-  it("shows unread notification count and opens the drawer", async () => {
-    useAppStore.getState().pushWorkspaceNotification({
-      text: "AI 刚更新了道具「玉佩」，点击查看",
-      target: {
-        type: "prop",
-        id: "玉佩",
-        route: "/props",
-      },
-    });
-
-    renderHeader();
-
-    expect(screen.getByTitle("会话通知: 1 条")).toBeInTheDocument();
-    screen.getByRole("button", { name: "打开通知中心" }).click();
-    expect(await screen.findByTestId("notifications-drawer")).toBeInTheDocument();
-  });
-
   it("exports the current project zip via browser-native download", async () => {
     vi.spyOn(API, "requestExportToken").mockResolvedValue({
       download_token: "test-download-token",
@@ -131,6 +111,7 @@ describe("GlobalHeader", () => {
     });
     expect(anchorClick).toHaveBeenCalled();
     expect(useAppStore.getState().toast?.text).toContain("包含 1 条诊断");
+    expect(await screen.findByRole("dialog", { name: "导出诊断" })).toBeInTheDocument();
   });
 
   it("「导出项目」只剩项目归档，并提示成片与剪映草稿在剪辑视图导出", async () => {
@@ -139,8 +120,8 @@ describe("GlobalHeader", () => {
     renderHeader();
     screen.getByRole("button", { name: "导出项目归档" }).click();
 
-    expect(await screen.findByRole("button", { name: /仅当前版本/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /全部数据/ })).toBeInTheDocument();
+    expect(await screen.findByRole("radio", { name: /仅当前版本/ })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /全部数据/ })).toBeInTheDocument();
     expect(screen.queryByText(/剪映草稿目录/)).not.toBeInTheDocument();
     expect(screen.getByText(/成片与剪映草稿在各集的剪辑视图中导出/)).toBeInTheDocument();
   });
@@ -196,6 +177,22 @@ describe("GlobalHeader", () => {
     });
   });
 
+  it("closes an already-open export dialog when the workbench switches to another real project", async () => {
+    useProjectsStore.setState({ currentProjectName: "project-a", currentProjectData: PROJECT_WITH_EPISODES as never });
+
+    renderHeader();
+    screen.getByRole("button", { name: "导出项目归档" }).click();
+    expect(await screen.findByText("选择导出范围")).toBeInTheDocument();
+
+    // 对话框打开时记下的是项目 A；经浏览器前进/后退复用同一个 GlobalHeader 切到项目 B 后，
+    // 弹窗须随之关闭，不能让选定范围后导出的仍是 A
+    useProjectsStore.setState({ currentProjectName: "project-b", currentProjectData: PROJECT_WITH_EPISODES as never });
+
+    await waitFor(() => {
+      expect(screen.queryByText("选择导出范围")).not.toBeInTheDocument();
+    });
+  });
+
   it("renders the usage entry for the current project", () => {
     useProjectsStore.setState({ currentProjectName: "real-project" });
 
@@ -214,10 +211,14 @@ describe("GlobalHeader", () => {
     expect(useAppStore.getState().usagePanelOpen).toBe(false);
   });
 
-  it("renders asset library button", async () => {
+  // 项目设置在项目切换器里；齿轮在项目内也只通往全局设置
+  it("links the gear to global settings and the back link to the lobby", () => {
+    useProjectsStore.setState({ currentProjectName: "real-project" });
+
     renderHeader();
 
-    expect(screen.getByRole("button", { name: "资产库" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "全局设置" })).toHaveAttribute("href", "/app/settings");
+    expect(screen.getByRole("link", { name: "项目" })).toHaveAttribute("href", "/app/projects");
   });
 
   it("shows an error toast when exporting fails", async () => {
@@ -239,8 +240,11 @@ describe("GlobalHeader", () => {
     renderHeader();
     await openExportScope("full");
 
+    expect(API.requestExportToken).toHaveBeenCalledWith("demo", "full");
     await waitFor(() => {
       expect(useAppStore.getState().toast?.text).toContain("导出失败");
     });
+    // 导出失败记入工作区通知，事后可在通知中心回看
+    expect(useAppStore.getState().workspaceNotifications[0]?.text).toContain("导出失败");
   });
 });

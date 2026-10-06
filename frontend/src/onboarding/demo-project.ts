@@ -55,6 +55,7 @@ const DEMO_STATUS: ProjectStatus = {
     prop: { total: 3, available: 2, stale: 0 },
   },
   episodes_summary: { total: 8, scripted: 1, in_production: 1, completed: 0 },
+  source_remaining: false,
 };
 
 /**
@@ -164,6 +165,8 @@ export function buildDemoProject(t: DemoT): ProjectSummary {
     style_image: null,
     thumbnail: null,
     status: DEMO_STATUS,
+    // 演示项目没有真实的修改记录，卡片上不写「几天前更新」。
+    last_activity_at: null,
   };
 }
 

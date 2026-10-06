@@ -9,8 +9,8 @@ ArcReel 假定贡献者用 coding Agent 开发。仓库根的 `AGENTS.md`（`CLA
 ## 本地开发环境
 
 ```bash
-# 前置要求：Python 3.12+, Node.js 20+, uv, pnpm（ffmpeg 随 Python 依赖 imageio-ffmpeg 安装）
-# 文档站 website/ 另需 Node 24（版本固定于 website/.node-version）
+# 前置要求：Python 3.12+, Node.js 24.12.0+, uv, pnpm（ffmpeg 随 Python 依赖 imageio-ffmpeg 安装）
+# 文档站 website/ 的 Node 版本固定于 website/.node-version
 # 操作系统：Linux / macOS / Windows WSL2；Windows 原生可运行项目创建与基础流程，
 # Agent 沙箱在 Windows 上降级为命令前缀白名单（见 docs/adr/0025），生产部署推荐 WSL2/Docker
 
@@ -63,6 +63,23 @@ pnpm check-consistency
 ## 测试
 
 开发循环与 push 前的完整闸门见 [`AGENTS.md`](https://github.com/ArcReel/ArcReel/blob/main/AGENTS.md)「工具链与校验」和 [`docs/agents/testing.md`](https://github.com/ArcReel/ArcReel/blob/main/docs/agents/testing.md)；CI 跑同一套检查。
+
+### 前端页面级测试
+
+`frontend/e2e/` 是 Playwright 页面级套件。它在 1024×600 到 2560×1440 的五个视口上打开各页面区域，检查文档本身不滚动、没有被裁切又无法滚动到达的内容，并用 axe 按 WCAG 2.2 AA 检查可访问性。CI 的 `frontend-e2e` job 在官方 Playwright 镜像里运行。本地用 run-server 远程模式在同一镜像里渲染，结果与 CI 一致：
+
+```bash
+cd frontend
+pnpm e2e:server   # 终端一：在 Docker 里启动 Playwright run-server，镜像版本取自 @playwright/test
+pnpm e2e:remote   # 终端二：构建前端，连接容器里的浏览器运行套件
+```
+
+没有 Docker 时，先运行 `pnpm exec playwright install chromium`，再运行 `pnpm e2e`。这种方式在本机渲染，字体与布局可能和 CI 不同，结果以容器内为准。
+
+- **新增场景**：在 `frontend/e2e/regions/` 下用 `defineRegionScenarios` 登记，写明打开的路由、就绪条件和要探测的状态。场景以会改变可用高度的状态为主，例如展开面板、打开弹层。
+- **豁免**：装饰性的裁切层用 `data-overflow-ok="原因"` 豁免，属性值必须写明原因。
+- **接口数据替身**：`frontend/e2e/fixtures/recorded/` 由 `pnpm e2e:record` 对真实后端录制。脚本需要 `uv`，会在临时数据目录里启动后端并创建演示项目。后端改动接口形状的 PR 同时重录，形状变化体现为替身文件的 diff。长文本、多条目等压力变体写在场景的 `api` 字段里。
+- **页面截图**：场景登记 `screenshot` 后，设置 `E2E_SCREENSHOTS=1` 运行才会比对。截图目前只作评审材料，不是 CI 闸门。
 
 ## 代码质量
 

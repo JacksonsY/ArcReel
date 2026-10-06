@@ -167,6 +167,15 @@ flowchart LR
 - Merchandise fidelity and reference consistency take priority;
 - Can generate voice-over copy, subtitles, and a Jianying draft, with dubbing completed after export.
 
+#### First Input and Story Setting {#ad-first-input}
+
+Ad/short video projects have no separate setup page. After you create the project, fill in the project overview:
+
+- **Creative brief**: the video you want, the target audience, tone and key selling points, plus the target duration.
+- **Merchandise**: click **Add product**, enter the name and description in the side panel, then upload product photos after the product is created. Without a product, you can still generate the script from the creative brief alone.
+
+Ad/short video projects have no source text. Edit the synopsis, genre, theme and world setting in the **Story setting** tab on the video page; AI script generation draws on them. After you save changes, a script that was already generated is marked outdated.
+
 #### Recommended Workflow {#ad-flow}
 
 ```mermaid
@@ -222,8 +231,8 @@ Multi-grid storyboards are not a separate generation mode but an image-generatio
 
 Image generation takes two steps:
 
-1. **Generate**: produces only the multi-grid storyboard itself and leaves each shot's existing storyboard image unchanged. Review it in **Multi-grid Storyboard Preview**; if you are not satisfied, regenerate it or upload your own composite image to replace it.
-2. **Split into cells**: once you are satisfied, click **Split into cells** in **Multi-grid Storyboard Preview**, or agree in the conversation to let the Agent split it. Splitting overwrites every storyboard image the multi-grid storyboard covers for shots still in the script (shots since removed from the script are skipped); the previous storyboard images stay in the version history and can be rolled back.
+1. **Generate**: produces only the multi-grid storyboard itself and leaves each shot's existing storyboard image unchanged. Review it in the episode page's **Storyboard grids** view; if you are not satisfied, regenerate it or upload your own composite image to replace it.
+2. **Split into cells**: once you are satisfied, click **Split into cells** in the **Storyboard grids** view, or agree in the conversation to let the Agent split it. Splitting overwrites every storyboard image the multi-grid storyboard covers for shots still in the script (shots since removed from the script are skipped); the previous storyboard images stay in the version history and can be rolled back.
 
 Multi-grid storyboards automatically use square 2×2 / 3×3 grids based on the number of shots. Each cell uses the same aspect ratio as the project video; when there are more shots, they are divided across multiple multi-grid storyboards according to the grid capacity. Denser 4×4 / 5×5 grids are available only when the image model's resolution tier is configured as 4K—the more cells a multi-grid storyboard contains, the lower the resolution of each cell, and dense grids at lower resolution tiers will degrade downstream video quality.
 
@@ -347,6 +356,15 @@ After the merge, references in every episode's script plan, final script, drafts
 For characters, you can also choose **Derivative**: the merged character becomes a derivative of the kept character, keeping its description, and the derivative sheet needs generating. Visual references point to that derivative, dialogue speakers change to the kept character, and the merged character's name is not recorded as an alias.
 
 The merged asset's description, sheet and version history, voice settings, reference image, and reference audio are not kept, and a merge can't be undone. Before you confirm, the dialog lists, per episode, how many references will be rewritten and how many storyboard images and videos will become stale. It also shows the merged asset's description so you can copy what you need into the kept asset.
+
+#### Delete assets {#delete-assets}
+
+Open the menu on an asset card and choose **Delete**. Before you confirm, the dialog checks references in every episode's script plan, final script, drafts, and prompt text:
+
+- If the asset is referenced, the dialog says which episodes reference it and how many times. Deleting doesn't rewrite those references, so shots that reference the asset will be blocked at generation. To keep the references, choose **Merge instead…** to [merge it into another asset of the same type](#merge-assets). Products can't be merged, so they don't have this button.
+- If nothing references the asset, the dialog only warns that deletion can't be undone.
+
+Deleting a character also deletes its derivatives. Deletion can't be undone.
 
 ### Stage 4: Small Sample {#stage-sample-clips}
 

@@ -114,6 +114,8 @@ export interface ProjectStatus {
   /** Asset sheet counts keyed by asset type (character / scene / prop / product) */
   assets: Record<string, ArtifactCount>;
   episodes_summary: EpisodesSummary;
+  /** The whole source still has text not yet planned into episodes; recorded by ledger commands, not read from source */
+  source_remaining: boolean;
 }
 
 /**
@@ -259,6 +261,8 @@ export interface ProjectSummary {
   style_image?: string | null;
   thumbnail: string | null;
   status: ProjectStatus | Record<string, never>;
+  /** 项目内容最近一次修改的时刻；列表按它从近到远排序。读不到项目时为 null。 */
+  last_activity_at: string | null;
 }
 
 export type ImportConflictPolicy = "prompt" | "rename" | "overwrite";

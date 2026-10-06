@@ -1,14 +1,17 @@
-import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { ContentBlock } from "@/types";
-import { ImageLightbox } from "@/components/ui/ImageLightbox";
+import { Marker, MarkerContent } from "@/components/ui/marker";
+import { ChatImage } from "./ChatImage";
 import { TextBlock } from "./TextBlock";
-import { ToolCallWithResult } from "./ToolCallWithResult";
+import { ToolCallWithResult, stringifyResult } from "./ToolCallWithResult";
+import { WorkDetail, WorkRow } from "./WorkRow";
+import { TOOL_RESULT_ICON } from "./work-label";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { SkillChip } from "./SkillChip";
 import { SubagentCard } from "./SubagentCard";
 import { TaskProgressBlock } from "./TaskProgressBlock";
 import { AgentFailureCard } from "./AgentFailureCard";
+import { CompactionMarker } from "./CompactionMarker";
 
 // ---------------------------------------------------------------------------
 // ContentBlockRenderer – dispatches a single ContentBlock to the appropriate
@@ -17,13 +20,16 @@ import { AgentFailureCard } from "./AgentFailureCard";
 // Block types:
 //   text             -> TextBlock (markdown)
 //   tool_use         -> SubagentCard (Agent/Task) / SkillChip (Skill)
-//                       / ToolCallWithResult (unified tool + result)
-//   tool_result      -> inline fallback (standalone results are rare)
+//                       / ToolCallWithResult，三者都是单行工序（WorkRow）
+//   tool_result      -> StandaloneToolResult（孤立结果，很少见）
 //   thinking         -> ThinkingBlock (single line; streaming or summary)
 //   skill_invocation -> SkillChip (standalone, no anchoring tool_use)
 //   task_progress    -> TaskProgressBlock (in-place updated task state)
-//   interrupt_notice -> inline interrupt indicator
+//   interrupt_notice -> 分隔线「已停止，这一轮的回复没有完成」
 //   question_answer  -> QuestionAnswerBlock (AskUserQuestion answer)
+//   agent_failure    -> AgentFailureCard（一句话结论，原始信息折叠在「详情」里）
+//   compact_summary  -> CompactionMarker（「上下文已压缩」分隔线，点开看摘要）
+//   image            -> ChatImage（点开看原图）
 // ---------------------------------------------------------------------------
 
 interface ContentBlockRendererProps {
@@ -58,7 +64,9 @@ export function ContentBlockRenderer({ block, index, streaming }: ContentBlockRe
             key={block.id ?? `block-${index}`}
             name={extractSkillName(block.input)}
             args={extractSkillArgs(block.input)}
-            status={block.result === undefined ? "running" : block.is_error ? "error" : "ok"}
+            pending={block.result === undefined}
+            failed={block.is_error}
+            result={block.result}
           />
         );
       }
@@ -108,12 +116,17 @@ export function ContentBlockRenderer({ block, index, streaming }: ContentBlockRe
     case "agent_failure":
       return block.failure ? <AgentFailureCard failure={block.failure} /> : null;
 
+    case "compact_summary":
+      return <CompactionMarker key={block.id ?? `block-${index}`} summary={block.text} />;
+
     case "image":
       if (block.source?.data && block.source?.media_type) {
         return (
-          <ChatImageBlock
+          <ChatImage
             key={block.id ?? `block-${index}`}
             src={`data:${block.source.media_type};base64,${block.source.data}`}
+            index={index + 1}
+            variant="inline"
           />
         );
       }
@@ -141,93 +154,46 @@ function extractSkillArgs(input: Record<string, unknown> | undefined): string {
   return typeof input.args === "string" ? input.args : "";
 }
 
+// 孤立的工具结果（没有对应的 tool_use，很少见）：同样是一行工序，展开看结果原文。
 function StandaloneToolResult({ block }: Readonly<{ block: ContentBlock }>) {
   const { t } = useTranslation("dashboard");
+  const result = stringifyResult(block.content);
+  const firstLine = result.split("\n").find((line) => line.trim())?.trim() ?? "";
   return (
-    <div className="my-1.5 rounded-lg border border-white/10 bg-ink-800/30 px-3 py-2">
-      <div className="text-[10px] uppercase tracking-wide text-slate-500 mb-1">
-        {block.is_error ? t("tool_call_error_label") : t("tool_call_result_label")}
-      </div>
-      <pre className="text-xs text-slate-300 overflow-x-auto whitespace-pre-wrap">
-        {typeof block.content === "string"
-          ? block.content
-          : block.content
-            ? JSON.stringify(block.content, null, 2)
-            : ""}
-      </pre>
-    </div>
+    <WorkRow
+      icon={TOOL_RESULT_ICON}
+      name={t("work_tool_result")}
+      summary={firstLine}
+      status={block.is_error ? "error" : "ok"}
+    >
+      {result && <WorkDetail label={t("tool_call_result_label")} text={result} error={block.is_error} />}
+    </WorkRow>
   );
 }
 
 function InterruptNoticeBlock() {
   const { t } = useTranslation("dashboard");
   return (
-    <div
-      className="my-1 flex items-center gap-1.5 text-[11.5px]"
-      style={{ color: "var(--color-warn)" }}
-    >
-      <span>{"■"}</span>
-      <span>{t("chat_interrupt_notice")}</span>
-    </div>
+    <Marker variant="separator">
+      <MarkerContent>{t("chat_interrupt_notice")}</MarkerContent>
+    </Marker>
   );
 }
 
-// AskUserQuestion 答复：结构化答案逐条呈现（问题 → 所选选项），
+// AskUserQuestion 答复：结构化答案逐条呈现（问题、所选选项），
 // 无结构化答案时回退展示原始结果文本。
 function QuestionAnswerBlock({ block }: Readonly<{ block: ContentBlock }>) {
-  const { t } = useTranslation("dashboard");
   const answers =
     block.answers && Object.keys(block.answers).length > 0 ? block.answers : null;
+  if (!answers) return <p className="whitespace-pre-wrap">{block.text}</p>;
   return (
-    <div className="my-0.5">
-      <div
-        className="text-[10px] font-semibold uppercase tracking-wide"
-        style={{ color: "var(--color-text-4)" }}
-      >
-        {t("chat_question_answer_label")}
-      </div>
-      {answers ? (
-        <div className="mt-1 flex flex-col gap-1">
-          {Object.entries(answers).map(([question, label]) => (
-            <div key={question} className="text-[12.5px] leading-[1.5]">
-              <span style={{ color: "var(--color-text-3)" }}>{question}</span>
-              <span className="mx-1" style={{ color: "var(--color-text-4)" }}>
-                {"→"}
-              </span>
-              <span className="font-medium" style={{ color: "var(--color-text)" }}>
-                {label}
-              </span>
-            </div>
-          ))}
+    <dl className="flex flex-col gap-1.5">
+      {Object.entries(answers).map(([question, label]) => (
+        <div key={question} className="min-w-0">
+          <dt className="text-muted-foreground">{question}</dt>
+          <dd className="font-medium">{label}</dd>
         </div>
-      ) : (
-        <div className="mt-1 text-[12px]" style={{ color: "var(--color-text-2)" }}>
-          {block.text}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ChatImageBlock({ src }: Readonly<{ src: string }>) {
-  const [open, setOpen] = useState(false);
-  return (
-    <>
-      <button
-        type="button"
-        className="mt-1 cursor-pointer border-0 bg-transparent p-0"
-        onClick={() => setOpen(true)}
-        aria-label="点击放大图片"
-      >
-        <img
-          src={src}
-          alt="附件图片"
-          className="max-w-full max-h-64 rounded-lg"
-        />
-      </button>
-      {open && (
-        <ImageLightbox src={src} alt="附件图片" onClose={() => setOpen(false)} />
-      )}
-    </>
+      ))}
+    </dl>
   );
 }

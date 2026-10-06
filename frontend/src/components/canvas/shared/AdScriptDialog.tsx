@@ -5,9 +5,10 @@ import { Bot, CheckCircle2, Loader2, RotateCcw, Sparkles, X } from "lucide-react
 import { ApiRequestError } from "@/api";
 import { enqueueAdScript, promptAuthoringResourceId } from "@/actions/generation";
 import { ScriptOverwriteConfirmDialog } from "@/components/shared/ScriptOverwriteConfirmDialog";
-import { GlassModal } from "@/components/ui/GlassModal";
-import { PrimaryButton } from "@/components/ui/PrimaryButton";
-import { SecondaryButton } from "@/components/ui/SecondaryButton";
+import { Button } from "@/components/ui/button";
+import { GlassModal } from "@/components/legacy/GlassModal";
+import { PrimaryButton } from "@/components/legacy/PrimaryButton";
+import { SecondaryButton } from "@/components/legacy/SecondaryButton";
 import { isAdScriptTask, useAdScriptEntry } from "@/hooks/useAdScriptEntry";
 import { useEpisodeLedger } from "@/hooks/useEpisodeLedger";
 import { useAdScriptStore, type AdScriptOpenRequest } from "@/stores/ad-script-store";
@@ -21,8 +22,8 @@ import { formatNameList } from "@/utils/list-format";
 
 const FIELD_STYLE: CSSProperties = {
   background: "linear-gradient(180deg, oklch(0.20 0.011 265 / 0.6), oklch(0.18 0.010 265 / 0.45))",
-  border: "1px solid var(--color-hairline)",
-  color: "var(--color-text)",
+  border: "1px solid var(--border)",
+  color: "var(--foreground)",
   boxShadow: "inset 0 1px 2px oklch(0 0 0 / 0.2)",
 };
 
@@ -125,18 +126,18 @@ export function AdScriptDialog({ request, onClose }: DialogProps) {
           <h2
             id={titleId}
             className="display-serif text-[17px] font-semibold tracking-tight"
-            style={{ color: "var(--color-text)" }}
+            style={{ color: "var(--foreground)" }}
           >
             {actionLabel}
           </h2>
-          <p id={descId} className="mt-1.5 text-[12.5px] leading-[1.55]" style={{ color: "var(--color-text-3)" }}>
+          <p id={descId} className="mt-1.5 text-[12.5px] leading-[1.55]" style={{ color: "var(--muted-foreground)" }}>
             {regenerate ? t("ad_script_regenerate_desc") : t("ad_script_desc")}
           </p>
 
           <label
             htmlFor={fieldId}
             className="mt-4 block text-[12px] font-medium"
-            style={{ color: "var(--color-text-2)" }}
+            style={{ color: "var(--subtle-foreground)" }}
           >
             {t("ad_script_instructions_label")}
           </label>
@@ -192,30 +193,31 @@ interface ButtonProps {
   projectName: string;
   episode: number;
   regenerate: boolean;
-  className?: string;
+  /** 页头动作用描边小按钮；空状态里的主操作用实心按钮。 */
+  prominent?: boolean;
 }
 
 /**
  * 打开广告/短片「AI 生成脚本」弹窗的入口；`regenerate` 时为「重新生成脚本」。
  * 任务在跑或缺创作灵感与商品时照常显示、置灰，悬停说明原因。
  */
-export function AdScriptButton({ projectName, episode, regenerate, className = "" }: ButtonProps) {
+export function AdScriptButton({ projectName, episode, regenerate, prominent = false }: ButtonProps) {
   const { t } = useTranslation("dashboard");
   const open = useAdScriptStore((s) => s.open);
   const { busy, refusedReason } = useAdScriptEntry(projectName, episode);
   const reason = busy ? t("ad_script_busy") : refusedReason;
   const Icon = busy ? Loader2 : regenerate ? RotateCcw : Sparkles;
   return (
-    <button
-      type="button"
-      className={`inline-flex items-center gap-1.5 disabled:cursor-not-allowed disabled:opacity-50 ${className}`.trim()}
+    <Button
+      variant={prominent ? "default" : "outline"}
+      size={prominent ? "default" : "sm"}
       disabled={reason !== null}
       title={reason ?? undefined}
       onClick={() => open({ projectName, episode, regenerate })}
     >
-      <Icon className={`h-3.5 w-3.5${busy ? " motion-safe:animate-spin" : ""}`} aria-hidden="true" />
-      <span>{regenerate ? t("ad_script_regenerate") : t("ad_script_generate")}</span>
-    </button>
+      <Icon className={busy ? "animate-spin" : undefined} aria-hidden data-icon="inline-start" />
+      {regenerate ? t("ad_script_regenerate") : t("ad_script_generate")}
+    </Button>
   );
 }
 
@@ -246,12 +248,12 @@ export function AdScriptProgress({ projectName, episode, noScript, className = "
       <div
         role="status"
         className={`flex items-center gap-2.5 rounded-xl px-4 py-3 text-[12.5px] ${className}`.trim()}
-        style={{ background: "var(--color-accent-dim)", border: "1px solid var(--color-accent-soft)", color: "var(--color-text-2)" }}
+        style={{ background: "color-mix(in oklab, var(--primary) 12%, transparent)", border: "1px solid color-mix(in oklab, var(--primary) 22%, transparent)", color: "var(--subtle-foreground)" }}
       >
-        <Loader2 className="h-4 w-4 shrink-0 motion-safe:animate-spin" style={{ color: "var(--color-accent-2)" }} aria-hidden />
+        <Loader2 className="h-4 w-4 shrink-0 motion-safe:animate-spin" style={{ color: "var(--primary)" }} aria-hidden />
         <span>
           {latestTask.status === "running" ? t("ad_script_progress_running") : t("ad_script_progress_queued")}{" "}
-          <span style={{ color: "var(--color-text-4)" }}>{t("ad_script_progress_hint")}</span>
+          <span style={{ color: "var(--muted-foreground)" }}>{t("ad_script_progress_hint")}</span>
         </span>
       </div>
     );
@@ -263,7 +265,7 @@ export function AdScriptProgress({ projectName, episode, noScript, className = "
       onClick={() => setDismissed(latestTask.task_id)}
       aria-label={t("ad_script_dismiss")}
       title={t("ad_script_dismiss")}
-      className="focus-ring ml-auto shrink-0 rounded p-0.5 opacity-70 transition-opacity hover:opacity-100"
+      className="focus-ring ml-auto shrink-0 rounded-sm p-0.5 opacity-70 transition-opacity hover:opacity-100"
     >
       <X className="h-3.5 w-3.5" aria-hidden="true" />
     </button>
@@ -275,9 +277,9 @@ export function AdScriptProgress({ projectName, episode, noScript, className = "
     <div
       role="status"
       className={`flex items-start gap-2.5 rounded-xl px-4 py-3 text-[12.5px] ${className}`.trim()}
-      style={{ background: "var(--color-accent-dim)", border: "1px solid var(--color-accent-soft)", color: "var(--color-text-2)" }}
+      style={{ background: "color-mix(in oklab, var(--primary) 12%, transparent)", border: "1px solid color-mix(in oklab, var(--primary) 22%, transparent)", color: "var(--subtle-foreground)" }}
     >
-      <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" style={{ color: "var(--color-accent-2)" }} aria-hidden />
+      <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" style={{ color: "var(--primary)" }} aria-hidden />
       <span>
         {t("ad_script_new_assets", {
           count: registered.length,

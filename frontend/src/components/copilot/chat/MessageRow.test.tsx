@@ -1,7 +1,9 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { base64OfSize } from "@/test/image-data";
 import { stubImageCanvas } from "@/test/imageCanvas";
 import type { Turn } from "@/types";
+import { MAX_ENCODED_IMAGE_BYTES } from "@/utils/image-transcode";
 import { MessageRow } from "./MessageRow";
 
 const userTurn: Turn = {
@@ -348,9 +350,119 @@ describe("MessageRow", () => {
     expect(onSubmitEdit).not.toHaveBeenCalled();
   });
 
+  it("shows the user's text exactly as typed instead of parsing it as Markdown", () => {
+    render(<MessageRow turn={{ ...userTurn, content: [{ type: "text", text: "把 **第 3 集** 改短" }] }} />);
+
+    expect(screen.getByText("把 **第 3 集** 改短")).toBeInTheDocument();
+  });
+
+  it("keeps user HTML, event attributes and unsafe links as literal text", () => {
+    const text = '<img src=x onerror="alert(1)"><script>alert(1)</script> [x](javascript:alert(1))';
+    const { container } = render(<MessageRow turn={{ ...userTurn, content: [{ type: "text", text }] }} />);
+
+    expect(screen.getByText(text)).toBeInTheDocument();
+    expect(container.querySelector("img, script, a[href]")).toBeNull();
+    expect(container.querySelector("[onerror]")).toBeNull();
+  });
+
+  it("marks an interrupted round with a separator line", () => {
+    render(<MessageRow turn={{ type: "system", uuid: "s-1", content: [{ type: "interrupt_notice" }] }} />);
+
+    expect(screen.getByText("已停止，这一轮的回复没有完成")).toBeInTheDocument();
+  });
+
+  it("shows a compaction summary as a context-compacted separator with the summary folded", async () => {
+    render(
+      <MessageRow
+        turn={{ type: "system", uuid: "c-1", content: [{ type: "compact_summary", text: "第 8 集已审完三个镜头" }] }}
+      />,
+    );
+
+    expect(screen.queryByText("第 8 集已审完三个镜头")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "上下文已压缩" }));
+    // 摘要按 Markdown 渲染，渲染器加载完会替换先显示的纯文本，所以每次重新查询
+    await waitFor(() => expect(screen.getByText("第 8 集已审完三个镜头")).toBeInTheDocument());
+  });
+
   it("gives a streaming draft no action row", () => {
     render(<MessageRow turn={{ ...userTurn, type: "assistant" }} streaming />);
 
     expect(screen.queryByLabelText("复制消息")).not.toBeInTheDocument();
+  });
+
+  it("rewrites a 7.5-24MB historical image message after serial client transcoding", async () => {
+    const canvas = stubImageCanvas();
+    const onSubmitEdit = vi.fn();
+    const oversized = base64OfSize(4 * 1024 * 1024);
+    const largeImageTurn: Turn = {
+      ...userTurn,
+      uuid: "u-large",
+      content: [
+        { type: "image", source: { type: "base64", media_type: "image/png", data: oversized } },
+        { type: "image", source: { type: "base64", media_type: "image/png", data: oversized } },
+        { type: "text", text: "按这两张图改人设" },
+      ],
+    };
+    render(<MessageRow turn={largeImageTurn} editable editing onSubmitEdit={onSubmitEdit} />);
+
+    expect(screen.getByRole("button", { name: "重新发送" })).toBeDisabled();
+    expect(canvas.decodes).toHaveLength(1);
+
+    await act(async () => {
+      await canvas.decodes[0].finish({ width: 4000, height: 3000 });
+    });
+    expect(canvas.decodes).toHaveLength(2);
+    await act(async () => {
+      await canvas.decodes[1].finish({ width: 4000, height: 3000 });
+    });
+
+    const resend = screen.getByRole("button", { name: "重新发送" });
+    expect(resend).toBeEnabled();
+    fireEvent.click(resend);
+
+    const payload = onSubmitEdit.mock.calls[0][2] as Array<{ data: string; media_type: string }>;
+    const maxBase64Chars = 4 * Math.ceil(MAX_ENCODED_IMAGE_BYTES / 3);
+    expect(payload).toHaveLength(2);
+    expect(payload.every((image) => image.media_type === "image/jpeg")).toBe(true);
+    expect(payload.every((image) => image.data.length <= maxBase64Chars)).toBe(true);
+  });
+
+  it("removes a failed historical attachment, keeps order, and reports its original position", async () => {
+    const canvas = stubImageCanvas();
+    const onSubmitEdit = vi.fn();
+    const brokenTurn: Turn = {
+      ...userTurn,
+      uuid: "u-broken",
+      content: [
+        { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } },
+        {
+          type: "image",
+          source: {
+            type: "base64",
+            media_type: "image/png",
+            data: base64OfSize(MAX_ENCODED_IMAGE_BYTES + 1),
+          },
+        },
+        { type: "image", source: { type: "base64", media_type: "image/jpeg", data: "BBBB" } },
+        { type: "text", text: "按这三张图改人设" },
+      ],
+    };
+    render(<MessageRow turn={brokenTurn} editable editing onSubmitEdit={onSubmitEdit} />);
+
+    await act(async () => {
+      await canvas.decodes[0].fail();
+    });
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "第 2 张历史附图无法读取，已移除；如需保留请重新上传",
+    );
+    expect(screen.getByRole("img", { name: "编辑中的附件 1/2" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "编辑中的附件 2/2" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重新发送" }));
+
+    expect(onSubmitEdit).toHaveBeenCalledWith("u-broken", "按这三张图改人设", [
+      { data: "AAAA", media_type: "image/png" },
+      { data: "BBBB", media_type: "image/jpeg" },
+    ]);
   });
 });

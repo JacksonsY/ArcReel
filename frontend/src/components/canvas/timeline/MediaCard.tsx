@@ -1,17 +1,19 @@
+import { useRef, useState } from "react";
+import { isResourceBusy } from "@/stores/tasks-store";
 import { Sparkles, ImageIcon, Film } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { useTranslation } from "react-i18next";
 import { API } from "@/api";
 import { usePlaybackStart } from "@/hooks/usePlaybackStart";
 import { useProjectsStore } from "@/stores/projects-store";
-import { AspectFrame } from "@/components/ui/AspectFrame";
-import { ImageFlipReveal } from "@/components/ui/ImageFlipReveal";
-import { PreviewableImageFrame } from "@/components/ui/PreviewableImageFrame";
+import { AspectFrame } from "@/components/canvas/shared/AspectFrame";
+import { PreviewableImageFrame } from "@/components/canvas/shared/PreviewableImageFrame";
 import { PresentationPlayer } from "@/components/shared/PresentationPlayer";
 import {
   UPLOAD_IMAGE_ACCEPT,
   UPLOAD_VIDEO_ACCEPT,
   UploadIconButton,
-} from "@/components/ui/UploadIconButton";
+} from "@/components/canvas/shared/UploadIconButton";
 import { useDemoWorkbench } from "@/onboarding/use-demo-workbench";
 import { formatCost } from "@/utils/cost-format";
 import type { CostBreakdown } from "@/types";
@@ -23,6 +25,9 @@ type MediaKind = "storyboard" | "video";
 
 interface MediaCardProps {
   kind: MediaKind;
+  restoring?: boolean;
+  onRestoringChange?: (restoring: boolean) => void;
+  checkBusy?: () => boolean;
   projectName: string;
   segmentId: string;
   /** 资产相对路径，如 storyboards/E1S2_v1.png */
@@ -41,6 +46,8 @@ interface MediaCardProps {
   estimatedCost?: CostBreakdown;
   /** 触发生成 */
   onGenerate?: () => void;
+  /** 生成按钮文案，缺省按有无产物写「生成」或「重新生成」；有未保存修改时传「保存并生成」。 */
+  generateLabel?: string;
   /** 版本恢复回调；未提供时不显示版本入口（只读展示无版本可回滚） */
   onRestore?: () => Promise<void> | void;
   /** 自主上传回调（替换该分镜的分镜图/视频）；未提供时不显示上传入口 */
@@ -70,13 +77,25 @@ export function MediaCard({
   generating,
   estimatedCost,
   onGenerate,
+  generateLabel: generateLabelOverride,
   onRestore,
   onUpload,
   uploading,
   uploadDisabled,
   editScriptFile,
+  restoring: externalRestoring,
+  onRestoringChange,
+  checkBusy,
 }: MediaCardProps) {
   const { t } = useTranslation("dashboard");
+  const [restoring, setRestoring] = useState(false);
+  const restoringRef = useRef(false);
+  const freshBusy = () => restoringRef.current || Boolean(checkBusy?.()) || isResourceBusy(kind, projectName, segmentId);
+  const setRestoreBusy = (next: boolean) => {
+    restoringRef.current = next;
+    setRestoring(next);
+    onRestoringChange?.(next);
+  };
   // 演示态只读：卡片上的四个写入口（上传 / 编辑 / 版本恢复 / 生成）从同一处判定关闭，
   // 不再各自靠「对应回调是否传入」推断——那让版本入口与其余入口分属两套机制。
   const demoReadOnly = useDemoWorkbench();
@@ -91,30 +110,25 @@ export function MediaCard({
   const title =
     kind === "storyboard" ? t("media_storyboard_title") : t("media_video_title");
   const generateLabel =
-    kind === "storyboard"
+    generateLabelOverride ??
+    (kind === "storyboard"
       ? assetPath
         ? t("media_regenerate_storyboard")
         : t("media_generate_storyboard")
       : assetPath
         ? t("media_regenerate_video")
-        : t("media_generate_video");
+        : t("media_generate_video"));
   const resourceType: "storyboards" | "videos" =
     kind === "storyboard" ? "storyboards" : "videos";
   // uploadDisabled 是本卡片之外的互斥占用（如同一分镜另一张卡在上传中）；
   // 编辑/版本恢复/生成同样写这个资源，须一并禁用，否则会与占用中的写操作并发冲突。
-  const resourceBusy = generating || uploading || uploadDisabled;
+  const resourceBusy = generating || uploading || uploadDisabled || restoring || externalRestoring;
 
   return (
     <div>
-      {/* Header */}
-      <div className="mb-2 flex items-center gap-1.5">
-        <Icon className="h-3.5 w-3.5" style={{ color: "var(--color-text-3)" }} />
-        <span
-          className="text-[12px] font-semibold"
-          style={{ color: "var(--color-text-2)" }}
-        >
-          {title}
-        </span>
+      <div className="mb-2 flex min-h-7 items-center gap-1.5">
+        <Icon aria-hidden className="size-3.5 text-muted-foreground" />
+        <h3 className="text-xs font-medium text-subtle-foreground">{title}</h3>
         <span className="flex-1" />
         {onUpload && !demoReadOnly && (
           <UploadIconButton
@@ -125,8 +139,8 @@ export function MediaCard({
                 : t("media_upload_video")
             }
             busy={uploading}
-            disabled={generating || uploadDisabled}
-            onSelect={(f) => void onUpload(f)}
+            disabled={resourceBusy}
+            onSelect={(f) => { if (!freshBusy()) void onUpload(f); }}
           />
         )}
         {kind === "storyboard" && editScriptFile && !demoReadOnly && (
@@ -146,32 +160,26 @@ export function MediaCard({
             resourceId={segmentId}
             onRestore={onRestore}
             busy={resourceBusy}
+            checkBusy={freshBusy}
+            onRestoringChange={setRestoreBusy}
           />
         )}
       </div>
 
-      {/* Media */}
       {assetUrl ? (
         kind === "storyboard" ? (
           <PreviewableImageFrame src={assetUrl} alt={`${itemIdWithinEpisode(segmentId)} ${title}`}>
             <AspectFrame ratio={aspectRatio}>
-              <ImageFlipReveal
+              <img
                 src={assetUrl}
                 alt={`${itemIdWithinEpisode(segmentId)} ${title}`}
                 loading="lazy"
-                className="h-full w-full object-cover"
-                fallback={null}
+                className="size-full object-cover"
               />
             </AspectFrame>
           </PreviewableImageFrame>
         ) : (
-          <div
-            className="overflow-hidden rounded-[10px]"
-            style={{
-              boxShadow:
-                "0 16px 40px -16px oklch(0 0 0 / 0.7), 0 0 0 1px var(--color-hairline)",
-            }}
-          >
+          <div className="overflow-hidden rounded-lg ring-1 ring-border">
             <AspectFrame ratio={aspectRatio}>
               <PresentationPlayer
                 key={`${segmentId}:${assetFp ?? "current"}`}
@@ -186,24 +194,17 @@ export function MediaCard({
         )
       ) : (
         <AspectFrame ratio={aspectRatio}>
-          <div
-            className="flex h-full w-full flex-col items-center justify-center gap-2 rounded-[10px]"
-            style={{
-              border: "1px dashed var(--color-hairline)",
-              background: "oklch(0.18 0.010 265 / 0.4)",
-              color: "var(--color-text-4)",
-            }}
-          >
-            <Icon className="h-5 w-5" />
-            <span className="text-[11.5px]">{t("media_not_generated")}</span>
+          <div className="flex size-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border bg-muted/30 text-muted-foreground">
+            <Icon aria-hidden className="size-5" />
+            <span className="text-xs">{t("media_not_generated")}</span>
           </div>
         </AspectFrame>
       )}
 
-      {/* Generate CTA */}
       {onGenerate && !demoReadOnly && (
-        <button
-          type="button"
+        <Button
+          className="mt-2.5 w-full"
+          size="lg"
           onClick={onGenerate}
           disabled={generateDisabled || resourceBusy}
           title={
@@ -211,22 +212,13 @@ export function MediaCard({
               ? (generateDisabledHint ?? t("media_generate_video_disabled_hint"))
               : undefined
           }
-          className="mt-2.5 inline-flex w-full items-center justify-center gap-1.5 rounded-[10px] px-3.5 py-2.5 text-[13px] font-semibold transition-opacity focus-ring disabled:cursor-not-allowed disabled:opacity-50"
-          style={{
-            color: "oklch(0.14 0 0)",
-            background: "linear-gradient(180deg, var(--color-accent-2), var(--color-accent))",
-            boxShadow:
-              "inset 0 1px 0 oklch(1 0 0 / 0.3), 0 4px 14px -4px var(--color-accent-glow)",
-          }}
         >
-          <Sparkles className="h-3.5 w-3.5" />
-          <span>{generateLabel}</span>
+          <Sparkles aria-hidden data-icon="inline-start" />
+          {generateLabel}
           {estimatedCost && Object.values(estimatedCost).some((v) => v > 0) && (
-            <span className="num ml-1 text-[11px] opacity-70">
-              ~{formatCost(estimatedCost)}
-            </span>
+            <span className="num text-xs font-normal">~{formatCost(estimatedCost)}</span>
           )}
-        </button>
+        </Button>
       )}
     </div>
   );

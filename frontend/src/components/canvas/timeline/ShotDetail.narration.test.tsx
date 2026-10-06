@@ -34,7 +34,7 @@ describe("ShotDetail 旁白正文", () => {
     expect(onUpdatePrompt).toHaveBeenCalledWith("E1S01", { novel_text: "雨停了。" });
   });
 
-  it("上游保存后草稿跟随新正文，取消恢复为已保存内容", () => {
+  it("上游保存后未修改的正文跟随新内容，放弃修改恢复为已保存内容", () => {
     const onUpdatePrompt = vi.fn();
     const { rerender } = render(detailElement(makeNarrationSegment({ novel_text: "雨下了一夜。" }), { onUpdatePrompt }));
     const box = () => screen.getByRole("textbox", { name: "旁白正文" }) as HTMLTextAreaElement;
@@ -42,8 +42,8 @@ describe("ShotDetail 旁白正文", () => {
     rerender(detailElement(makeNarrationSegment({ novel_text: "Agent 改过的正文。" }), { onUpdatePrompt }));
     expect(box().value).toBe("Agent 改过的正文。");
 
-    fireEvent.change(box(), { target: { value: "草稿" } });
-    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    fireEvent.change(box(), { target: { value: "改写中的正文" } });
+    fireEvent.click(screen.getByRole("button", { name: "放弃修改" }));
     expect(box().value).toBe("Agent 改过的正文。");
   });
 
@@ -79,7 +79,7 @@ describe("ShotDetail 旁白正文", () => {
 
     const remove = screen.getByRole("button", { name: "移除分镜" });
     expect(remove).toBeDisabled();
-    expect(remove).toHaveAttribute("title", "本集只剩这一个分镜，不能移除");
+    expect(remove).toHaveAccessibleDescription("本集只剩这一个分镜，不能移除");
     expect(screen.getByRole("button", { name: "在此后插入" })).toBeEnabled();
   });
   it("旁白配音生成进行中时移除分镜禁用并说明原因，新增仍可用", () => {
@@ -94,7 +94,7 @@ describe("ShotDetail 旁白正文", () => {
 
     const remove = screen.getByRole("button", { name: "移除分镜" });
     expect(remove).toBeDisabled();
-    expect(remove).toHaveAttribute("title", "该分镜有生成任务进行中，完成后才能移除");
+    expect(remove).toHaveAccessibleDescription("该分镜有生成任务进行中，完成后才能移除");
     expect(screen.getByRole("button", { name: "在此后插入" })).toBeEnabled();
   });
 });
@@ -113,16 +113,18 @@ describe("ShotDetail 改序与章节切分点", () => {
     ]);
   });
 
-  it("切换章节切分点即保存，不弹确认", async () => {
-    const onUpdatePrompt = vi.fn().mockResolvedValue(undefined);
+  it("切换章节切分点进入未保存修改，不弹确认，保存时写回", async () => {
+    const onUpdatePrompt = vi.fn().mockResolvedValue(true);
     render(detailElement(makeNarrationSegment({ segment_break: false }), { onUpdatePrompt }));
 
     const toggle = screen.getByRole("switch", { name: "设为章节切分点" });
     expect(toggle).not.toBeChecked();
     fireEvent.click(toggle);
 
-    await waitFor(() => expect(onUpdatePrompt).toHaveBeenCalledWith("E1S01", "segment_break", true));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(onUpdatePrompt).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(onUpdatePrompt).toHaveBeenCalledWith("E1S01", { segment_break: true }));
   });
 
   it("只读模式不给章节切分点开关", () => {

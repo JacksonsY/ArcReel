@@ -1,6 +1,7 @@
 import { itemIdsInEpisodeText } from "@/utils/episode-display";
 import { describe, it, expect, vi, afterEach, type MockInstance } from "vitest";
 import { render, screen, fireEvent, waitFor, act, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { ScriptReviewGate } from "./ScriptReviewGate";
 import { API, ApiRequestError } from "@/api";
 import { useAppStore } from "@/stores/app-store";
@@ -244,8 +245,7 @@ describe("ScriptReviewGate", () => {
 
     render(<ScriptReviewGate projectName="p" episode={1} contentMode="drama" />);
 
-    const button = await screen.findByRole("button", { name: "确认并继续" });
-    expect(button).not.toHaveAttribute("data-tone");
+    expect(await screen.findByRole("button", { name: "确认并继续" })).toBeEnabled();
     expect(screen.queryByText("确认并覆盖正式脚本")).not.toBeInTheDocument();
   });
 
@@ -278,12 +278,11 @@ describe("ScriptReviewGate", () => {
     render(<ScriptReviewGate projectName="p" episode={1} contentMode="drama" />);
 
     const button = await screen.findByRole("button", { name: "确认并覆盖正式脚本" });
-    expect(button).toHaveAttribute("data-tone", "danger");
     expect(screen.getByText("本集已有正式脚本，确认会按脚本规划整份重建它。")).toBeInTheDocument();
 
     fireEvent.click(button);
 
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await screen.findByRole("alertdialog");
     // 确认框原样呈现服务端生成的丢失清单，不在前端另拼。
     expect(within(dialog).getByText(itemIdsInEpisodeText(overwrite.text), { normalizer: (text) => text })).toBeInTheDocument();
     expect(confirm).not.toHaveBeenCalled();
@@ -291,7 +290,7 @@ describe("ScriptReviewGate", () => {
     fireEvent.click(screen.getByRole("button", { name: "覆盖并确认" }));
 
     await waitFor(() => expect(confirm).toHaveBeenCalledWith("p", 1, { overwriteRevision: "sha256-v1:listed" }));
-    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
   });
 
   it("switches to the danger confirm when the server reports an existing formal script", async () => {
@@ -308,8 +307,7 @@ describe("ScriptReviewGate", () => {
     render(<ScriptReviewGate projectName="p" episode={1} contentMode="drama" />);
     fireEvent.click(await screen.findByRole("button", { name: "确认并继续" }));
 
-    const button = await screen.findByRole("button", { name: "确认并覆盖正式脚本" });
-    expect(button).toHaveAttribute("data-tone", "danger");
+    expect(await screen.findByRole("button", { name: "确认并覆盖正式脚本" })).toBeEnabled();
   });
 
   it("keeps the overwrite dialog open with the refreshed list when the formal script changed meanwhile", async () => {
@@ -334,12 +332,12 @@ describe("ScriptReviewGate", () => {
     fireEvent.click(await screen.findByRole("button", { name: "确认并覆盖正式脚本" }));
     fireEvent.click(await screen.findByRole("button", { name: "覆盖并确认" }));
 
-    await waitFor(() => expect(screen.getByRole("dialog")).toHaveTextContent("S07"));
-    expect(screen.getByRole("dialog")).toHaveTextContent(itemIdsInEpisodeText(refreshed.text));
+    await waitFor(() => expect(screen.getByRole("alertdialog")).toHaveTextContent("S07"));
+    expect(screen.getByRole("alertdialog")).toHaveTextContent(itemIdsInEpisodeText(refreshed.text));
 
     fireEvent.click(screen.getByRole("button", { name: "覆盖并确认" }));
     await waitFor(() => expect(confirm).toHaveBeenLastCalledWith("p", 1, { overwriteRevision: "sha256-v1:refreshed" }));
-    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
   });
 
   it.each([400, 422])("warns and disables confirm when capabilities return %i", async (status) => {
@@ -350,7 +348,7 @@ describe("ScriptReviewGate", () => {
 
     const notice = await screen.findByRole("alert");
     expect(notice).toHaveTextContent("尚未配置可用的视频模型");
-    expect(screen.getByRole("link", { name: "前往项目设置" })).toHaveAttribute("href", "/app/projects/p/settings");
+    expect(screen.getByRole("link", { name: "前往项目设置" })).toHaveAttribute("href", "/app/projects/p/settings?tab=models");
     const button = screen.getByRole("button", { name: "确认并继续" });
     expect(button).toBeDisabled();
     expect(button).toHaveAttribute("title", expect.stringContaining("尚未配置可用的视频模型"));
@@ -385,7 +383,7 @@ describe("ScriptReviewGate", () => {
       rejectCapabilities(new ApiRequestError("无法解析", undefined, 422));
     });
 
-    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "覆盖并确认" })).toBeDisabled();
   });
 
@@ -776,12 +774,22 @@ describe("ScriptReviewGate", () => {
     expect(screen.queryByDisplayValue("服务端覆盖文案")).not.toBeInTheDocument();
   });
 
-  it("shows an empty state when there is no script_plan content", async () => {
+  it("shows the first-plan starter when the episode has neither a plan nor a formal script", async () => {
     vi.spyOn(API, "getScriptReview").mockResolvedValue(
       dramaState({ status: "no_script_plan", content: null, fingerprint: null }),
     );
     render(<ScriptReviewGate projectName="p" episode={1} contentMode="drama" />);
-    await waitFor(() => expect(screen.getByText("暂无脚本规划结果")).toBeInTheDocument());
+    expect(await screen.findByRole("heading", { name: "这一集还没有脚本" })).toBeInTheDocument();
+    expect(screen.queryByText("暂无脚本规划结果")).not.toBeInTheDocument();
+  });
+
+  it("treats an episode with a formal script but no plan as a re-plan, not a first plan", async () => {
+    vi.spyOn(API, "getScriptReview").mockResolvedValue(
+      dramaState({ status: "no_script_plan", content: null, fingerprint: null }),
+    );
+    render(<ScriptReviewGate projectName="p" episode={1} contentMode="drama" onOpenTimeline={() => {}} />);
+    expect(await screen.findByText("暂无脚本规划结果")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "这一集还没有脚本" })).not.toBeInTheDocument();
   });
 
   it("offers AI script planning from the empty state, replacing an existing formal script only after confirmation", async () => {
@@ -811,7 +819,7 @@ describe("ScriptReviewGate", () => {
       .mockResolvedValueOnce(dramaState({ status: "no_script_plan", content: null, fingerprint: null }))
       .mockRejectedValue(new Error("刷新失败"));
     render(<ScriptReviewGate projectName="p" episode={1} contentMode="drama" />);
-    await waitFor(() => expect(screen.getByText("暂无脚本规划结果")).toBeInTheDocument());
+    expect(await screen.findByRole("heading", { name: "这一集还没有脚本" })).toBeInTheDocument();
 
     // 空态无真实内容可保留：revision 静默刷新失败应进错误态（区别于空态）并给重试，不滞留在过时空态。
     act(() => {
@@ -821,7 +829,7 @@ describe("ScriptReviewGate", () => {
     await waitFor(() => expect(get).toHaveBeenCalledTimes(2));
     expect(screen.getByText("无法加载脚本规划结果")).toBeInTheDocument();
     expect(screen.getByText("重试")).toBeInTheDocument();
-    expect(screen.queryByText("暂无脚本规划结果")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "这一集还没有脚本" })).not.toBeInTheDocument();
   });
 
   it("keeps existing content when a silent refetch fails", async () => {
@@ -999,14 +1007,29 @@ describe("ScriptReviewGate item fields", () => {
     return save.mock.calls[0][2];
   }
 
+  /** 展开 S01 的时长下拉，读出选项后收起。 */
+  async function durationOptions() {
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("combobox", { name: "S01 时长" }));
+    const labels = (await screen.findAllByRole("option")).map((option) => option.textContent);
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("listbox")).not.toBeInTheDocument());
+    return labels;
+  }
+
+  async function pickDuration(label: string) {
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("combobox", { name: "S01 时长" }));
+    await user.click(await screen.findByRole("option", { name: label }));
+  }
+
   it("picks a duration from the current tiers and saves it", async () => {
     vi.spyOn(API, "getScriptReview").mockResolvedValue(narrationWith({}));
     const save = vi.spyOn(API, "saveScriptReviewContent").mockResolvedValue(narrationWith({ duration_seconds: 8 }));
 
     render(<ScriptReviewGate projectName="p" episode={1} contentMode="narration" durationOptions={[4, 6, 8]} />);
-    const select = await screen.findByLabelText("S01 时长");
-    expect(within(select).getAllByRole("option").map((o) => o.textContent)).toEqual(["4 秒", "6 秒", "8 秒"]);
-    fireEvent.change(select, { target: { value: "8" } });
+    expect(await durationOptions()).toEqual(["4 秒", "6 秒", "8 秒"]);
+    await pickDuration("8 秒");
 
     expect(await saveAndReadContent(save)).toMatchObject({ segments: [{ duration_seconds: 8 }] });
   });
@@ -1030,7 +1053,7 @@ describe("ScriptReviewGate item fields", () => {
     expect(confirm).toBeDisabled();
     expect(confirm).toHaveAttribute("title", "有分镜的时长不在当前档位内，请改选后再确认");
 
-    fireEvent.change(screen.getByLabelText("S01 时长"), { target: { value: "8" } });
+    await pickDuration("8 秒");
     expect(screen.queryByText("当前秒数 6 在当前分辨率下不可用，可选 [4, 8]")).not.toBeInTheDocument();
     expect(confirm).toBeEnabled();
   });
@@ -1046,14 +1069,13 @@ describe("ScriptReviewGate item fields", () => {
 
     render(<ScriptReviewGate projectName="p" episode={1} contentMode="narration" />);
 
-    const select = await screen.findByLabelText("S01 时长");
-    expect(within(select).getAllByRole("option").map((o) => o.textContent)).toEqual(["4 秒", "6 秒", "8 秒"]);
+    expect(await durationOptions()).toEqual(["4 秒", "6 秒", "8 秒"]);
     expect(screen.getByText("时长由端点固定：每段成片多长由 workflow 决定。")).toBeInTheDocument();
     expect(screen.getByText("当前秒数 6 不在模型支持范围 [4, 8] 内")).toBeInTheDocument();
     const confirm = screen.getByRole("button", { name: "确认并继续" });
     expect(confirm).toBeDisabled();
 
-    fireEvent.change(select, { target: { value: "8" } });
+    await pickDuration("8 秒");
     expect(confirm).toBeEnabled();
   });
 
@@ -1092,7 +1114,7 @@ describe("ScriptReviewGate item fields", () => {
 
     fireEvent.click(xiaotao);
     fireEvent.click(within(dialog).getByRole("button", { name: /旧宅/ }));
-    fireEvent.click(within(dialog).getByRole("button", { name: "保存" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "确定" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
 
     expect(await saveAndReadContent(save)).toMatchObject({

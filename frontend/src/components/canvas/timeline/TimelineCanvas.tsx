@@ -1,19 +1,19 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Sparkles } from "lucide-react";
+import { useCallback, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ScriptReviewGate } from "./ScriptReviewGate";
 import { PromptAuthoringButton } from "@/components/canvas/shared/PromptAuthoringButton";
+import { RetainedEditUnit } from "@/components/shared/edit-unit/RetainedEditUnit";
 import { ShotSplitView } from "./ShotSplitView";
 import { StoryboardBatchDialog } from "./StoryboardBatchDialog";
-import { EpisodeHeader } from "./EpisodeHeader";
 import { EmptyScriptState } from "./EmptyScriptState";
 import type { InsertShotHandler } from "./ShotStructureActions";
 import { AdScriptButton, AdScriptProgress } from "@/components/canvas/shared/AdScriptDialog";
 import { NoScriptBlankState } from "@/components/canvas/shared/StartBlankScriptButton";
-import { useCostStore } from "@/stores/cost-store";
+import { BatchFillButton, useBatchGap } from "@/components/canvas/episode-page/BatchFillButton";
+import { EpisodeHeaderActions } from "@/components/canvas/episode-page/EpisodeHeaderActions";
+import type { EpisodeCanvasContext } from "@/components/canvas/episode-page/EpisodePage";
 import { useActiveResourceIds } from "@/stores/tasks-store";
-import { useEpisodeSurfaceRequest } from "@/stores/episode-surface-store";
-import { getScriptItemId, sumItemDuration } from "@/utils/script-shape";
+import { getScriptItemId } from "@/utils/script-shape";
 import { previewAspect } from "@/utils/preview-aspect";
 import { ONBOARDING_ANCHORS } from "@/onboarding/anchors";
 import { useDemoWorkbench } from "@/onboarding/use-demo-workbench";
@@ -32,20 +32,15 @@ import type {
 
 type Segment = NarrationSegment | DramaScene | AdShot;
 
-interface TimelineCanvasProps {
+interface TimelineCanvasProps extends EpisodeCanvasContext {
   projectName: string;
   episode: number;
-  episodeTitle?: string;
   hasDraft?: boolean;
   episodeScript: EpisodeScript | null;
   scriptFile?: string;
   projectData: ProjectData | null;
-  onUpdatePrompt?: (
-    segmentId: string,
-    fieldOrPatch: string | Record<string, unknown>,
-    value?: unknown,
-    scriptFile?: string,
-  ) => void | Promise<void>;
+  /** 保存分镜字段：失败时抛错；resolve 为本地剧本是否已刷新到保存后的内容。 */
+  onUpdatePrompt?: (segmentId: string, patch: Record<string, unknown>, scriptFile?: string) => Promise<boolean>;
   /** 分镜改序：移到 afterId 之后，null 移到最前；resolve 为是否移动成功 */
   onMoveShot?: (shotId: string, afterId: string | null, scriptFile?: string) => Promise<boolean>;
   /** 新增分镜（旁白带正文）：afterId 为 null 时追加到末尾；resolve 为是否成功 */
@@ -68,8 +63,6 @@ interface TimelineCanvasProps {
   durationWarningReason?: (seconds: number) => DurationOutOfRangeReason | null;
   onRestoreStoryboard?: () => Promise<void> | void;
   onRestoreVideo?: () => Promise<void> | void;
-  onSaveTitle?: (next: string) => Promise<void>;
-  canEditTitle?: boolean;
 }
 
 /**
@@ -83,8 +76,6 @@ const DEMO_READ_ONLY_PROPS = {
   onRemoveShot: undefined,
   onGenerateNarration: undefined,
   onGenerateEpisodeNarration: undefined,
-  onSaveTitle: undefined,
-  canEditTitle: false,
 } as const satisfies Partial<TimelineCanvasProps>;
 
 export function TimelineCanvas(props: TimelineCanvasProps) {
@@ -93,7 +84,8 @@ export function TimelineCanvas(props: TimelineCanvasProps) {
   const {
     projectName,
     episode,
-    episodeTitle,
+    view,
+    onViewChange,
     hasDraft,
     episodeScript,
     scriptFile,
@@ -115,8 +107,6 @@ export function TimelineCanvas(props: TimelineCanvasProps) {
     onGenerateEpisodeNarration,
     onRestoreStoryboard,
     onRestoreVideo,
-    onSaveTitle,
-    canEditTitle,
   } = demoReadOnly ? { ...props, ...DEMO_READ_ONLY_PROPS } : props;
 
   const { t } = useTranslation("dashboard");
@@ -127,31 +117,10 @@ export function TimelineCanvas(props: TimelineCanvasProps) {
     contentMode === "narration" ? "narration" : contentMode === "ad" ? "ad" : "drama";
 
   const hasScript = Boolean(episodeScript);
-  // 广告/短片一键生成不走脚本规划中间文件，脚本规划 tab 对该创作类型无意义，仅 timeline 单 tab
-  const showTabs = Boolean(hasDraft) && editorContentMode !== "ad";
-  const defaultTab = hasScript ? "timeline" : "preprocessing";
-  const [activeTab, setActiveTab] = useState<"preprocessing" | "timeline">(defaultTab);
   const [batchKind, setBatchKind] = useState<StoryboardBatchKind | null>(null);
-
-  // Auto-switch to timeline when script becomes available
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- script 就绪时自动切到 timeline tab，是 navigation 驱动的有意切换
-    if (hasScript) setActiveTab("timeline");
-  }, [hasScript]);
-
-  useEpisodeSurfaceRequest(projectName, episode, "script_plan", () => {
-    if (showTabs) setActiveTab("preprocessing");
-  });
-
-  const episodeCost = useCostStore((s) =>
-    episodeScript ? s.getEpisodeCost(episodeScript.episode) : undefined,
-  );
-  const debouncedFetch = useCostStore((s) => s.debouncedFetch);
-
-  useEffect(() => {
-    if (!projectName) return;
-    debouncedFetch(projectName);
-  }, [projectName, episodeScript?.episode, debouncedFetch]);
+  const storyboardGap = useBatchGap(projectName, episode, "storyboards", "storyboard");
+  const videoGap = useBatchGap(projectName, episode, "videos", "video");
+  const narrationGap = useBatchGap(projectName, episode, "narration", "tts");
 
   const aspectRatio = previewAspect(projectData);
 
@@ -200,37 +169,19 @@ export function TimelineCanvas(props: TimelineCanvasProps) {
 
   // 广告/短片没有脚本规划：没有正式脚本时直接从空白开始。
   if (projectData && !episodeScript && !hasDraft && editorContentMode === "ad" && !demoReadOnly) {
-    return <NoScriptBlankState projectName={projectName} episode={episode} className="h-full text-[13px]" />;
+    return <NoScriptBlankState projectName={projectName} episode={episode} className="h-full text-sm" />;
   }
 
   if (!projectData || (!episodeScript && !hasDraft)) {
     return (
-      <div
-        className="flex h-full items-center justify-center"
-        style={{ color: "var(--color-text-4)" }}
-      >
+      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
         {t("select_episode_hint")}
       </div>
     );
   }
 
-  const totalDuration = sumItemDuration(segments);
-
-  const currentEpisodeMeta = projectData?.episodes?.find((e) => e.episode === episode);
-  const epMeta =
-    currentEpisodeMeta ??
-    ({
-      episode,
-      title: episodeTitle ?? episodeScript?.title ?? "",
-      script_file: scriptFile ?? "",
-      item_count: segments.length,
-      duration_seconds: totalDuration,
-      status: hasScript ? "in_production" : "draft",
-    } as const);
-
   const handleUpdatePrompt = onUpdatePrompt
-    ? (segId: string, fieldOrPatch: string | Record<string, unknown>, value?: unknown) =>
-        onUpdatePrompt(segId, fieldOrPatch, value, scriptFile)
+    ? (segId: string, patch: Record<string, unknown>) => onUpdatePrompt(segId, patch, scriptFile)
     : undefined;
   const handleMoveShot = onMoveShot
     ? (shotId: string, afterId: string | null) => onMoveShot(shotId, afterId, scriptFile)
@@ -254,118 +205,35 @@ export function TimelineCanvas(props: TimelineCanvasProps) {
     : undefined;
 
   return (
-    <div className="flex h-full flex-col overflow-hidden">
-      {/* 集 header */}
-      <EpisodeHeader
-        ep={epMeta}
-        segmentCount={segments.length}
-        totalDuration={totalDuration}
-        episodeCost={episodeCost ?? undefined}
-        onSaveTitle={onSaveTitle}
-        canEditTitle={canEditTitle}
-      />
-
-      {/* Tab bar + 批量按钮 */}
-      <div
-        className="flex items-center gap-0.5 px-5"
-        style={{
-          borderBottom: "1px solid var(--color-hairline)",
-          background: "oklch(0.19 0.012 250 / 0.5)",
-        }}
-      >
-        {showTabs && (
-          <button
-            type="button"
-            onClick={() => setActiveTab("preprocessing")}
-            className="relative px-3.5 py-2.5 text-[12.5px] font-medium transition-colors focus-ring"
-            style={{
-              color:
-                activeTab === "preprocessing"
-                  ? "var(--color-text)"
-                  : "var(--color-text-3)",
-            }}
-          >
-            {t("tab_script_plan")}
-            {activeTab === "preprocessing" && (
-              <span
-                aria-hidden="true"
-                className="absolute -bottom-px left-2.5 right-2.5 h-0.5 rounded"
-                style={{ background: "var(--color-accent)" }}
-              />
-            )}
-          </button>
-        )}
-        <button
-          type="button"
-          onClick={() => hasScript && setActiveTab("timeline")}
-          disabled={!hasScript}
-          className="relative px-3.5 py-2.5 text-[12.5px] font-medium transition-colors focus-ring disabled:cursor-not-allowed"
-          style={{
-            color:
-              activeTab === "timeline"
-                ? "var(--color-text)"
-                : !hasScript
-                  ? "var(--color-text-4)"
-                  : "var(--color-text-3)",
-          }}
-        >
-          {t("tab_timeline")}
-          {activeTab === "timeline" && (
-            <span
-              aria-hidden="true"
-              className="absolute -bottom-px left-2.5 right-2.5 h-0.5 rounded"
-              style={{ background: "var(--color-accent)" }}
+    <div className="flex h-full min-h-0 flex-col">
+      {view === "board" && hasScript && (
+        <EpisodeHeaderActions>
+          {editorContentMode === "ad" && !demoReadOnly && (
+            <AdScriptButton projectName={projectName} episode={episode} regenerate />
+          )}
+          <PromptAuthoringButton projectName={projectName} episode={episode} scope="pending" />
+          <BatchFillButton
+            kind="storyboards"
+            count={storyboardGap}
+            disabled={demoReadOnly}
+            onClick={() => setBatchKind("storyboards")}
+          />
+          <BatchFillButton
+            kind="videos"
+            count={videoGap}
+            disabled={demoReadOnly}
+            onClick={() => setBatchKind("videos")}
+          />
+          {contentMode === "narration" && onGenerateEpisodeNarration && (
+            <BatchFillButton
+              kind="narration"
+              count={narrationGap}
+              disabled={narrationBatchBusy}
+              onClick={() => onGenerateEpisodeNarration(scriptFile)}
             />
           )}
-        </button>
-        <span className="flex-1" />
-
-        {activeTab === "timeline" && hasScript && (
-          <div className="mr-1 inline-flex items-center gap-1.5">
-            {editorContentMode === "ad" && !demoReadOnly && (
-              <AdScriptButton projectName={projectName} episode={episode} regenerate className="sv-navbtn" />
-            )}
-            <PromptAuthoringButton
-              projectName={projectName}
-              episode={episode}
-              scope="pending"
-              className="sv-navbtn"
-            />
-            <button
-              type="button"
-              className="sv-navbtn inline-flex items-center gap-1.5"
-              disabled={demoReadOnly}
-              onClick={() => setBatchKind("storyboards")}
-              title={t("batch_generate_storyboards")}
-            >
-              <Sparkles className="h-3 w-3" />
-              <span>{t("batch_generate_storyboards")}</span>
-            </button>
-            <button
-              type="button"
-              className="sv-navbtn inline-flex items-center gap-1.5"
-              disabled={demoReadOnly}
-              onClick={() => setBatchKind("videos")}
-              title={t("batch_generate_videos")}
-            >
-              <Sparkles className="h-3 w-3" />
-              <span>{t("batch_generate_videos")}</span>
-            </button>
-            {contentMode === "narration" && onGenerateEpisodeNarration && (
-              <button
-                type="button"
-                className="sv-navbtn inline-flex items-center gap-1.5"
-                disabled={narrationBatchBusy}
-                onClick={() => onGenerateEpisodeNarration(scriptFile)}
-                title={t("batch_generate_narration")}
-              >
-                <Sparkles className="h-3 w-3" />
-                <span>{t("batch_generate_narration")}</span>
-              </button>
-            )}
-          </div>
-        )}
-      </div>
+        </EpisodeHeaderActions>
+      )}
 
       {batchKind && (
         <StoryboardBatchDialog
@@ -381,12 +249,9 @@ export function TimelineCanvas(props: TimelineCanvasProps) {
       )}
 
       {/* 主体 */}
-      <div
-        className="min-h-0 flex-1 overflow-hidden"
-        data-onboarding={ONBOARDING_ANCHORS.workbenchTimeline}
-      >
-        {activeTab === "preprocessing" && hasDraft && editorContentMode !== "ad" ? (
-          <div className="h-full overflow-y-auto p-4">
+      <div className="flex min-h-0 flex-1 flex-col" data-onboarding={ONBOARDING_ANCHORS.workbenchTimeline}>
+        <RetainedEditUnit identity={episodeScript && segments.length > 0 ? "shots" : "empty"} message={t("shot_externally_removed")} value={view === "plan" && hasDraft && editorContentMode !== "ad" ? (
+          <div className="relative h-full overflow-y-auto p-4">
             <ScriptReviewGate
               key={`${projectName}:${episode}`}
               projectName={projectName}
@@ -396,51 +261,46 @@ export function TimelineCanvas(props: TimelineCanvasProps) {
               durationOptions={planDurationOptions}
               durationEndpointFixed={durationEndpointFixed}
               durationWarningReason={durationWarningReason}
-              onOpenTimeline={hasScript ? () => setActiveTab("timeline") : undefined}
+              onOpenTimeline={hasScript ? () => onViewChange("board") : undefined}
             />
           </div>
         ) : episodeScript && segments.length > 0 ? (
-          <div className="flex h-full flex-col">
-            <div className="min-h-0 flex-1 overflow-hidden">
-              <ShotSplitView
-                segments={segments}
-                contentMode={editorContentMode}
-                aspectRatio={aspectRatio}
-                projectName={projectName}
-                episode={episode}
-                scriptFile={scriptFile}
-                onUpdatePrompt={handleUpdatePrompt}
-                onMoveShot={handleMoveShot}
-                onInsertShot={handleInsertShot}
-                onRemoveShot={handleRemoveShot}
-                onGenerateStoryboard={handleGenSb}
-                onGenerateVideo={handleGenVid}
-                onGenerateNarration={handleGenNarration}
-                onRestoreStoryboard={onRestoreStoryboard}
-                onRestoreVideo={onRestoreVideo}
-                generatingStoryboard={generatingStoryboard}
-                generatingVideo={generatingVideo}
-                generatingNarration={generatingNarration}
-                durationOptions={durationOptions}
-                durationEndpointFixed={durationEndpointFixed}
-                lastFrame={lastFrame}
-                capabilitiesLoading={capabilitiesLoading}
-                durationWarningReason={durationWarningReason}
-              />
-            </div>
-          </div>
+          <ShotSplitView
+            segments={segments}
+            contentMode={editorContentMode}
+            aspectRatio={aspectRatio}
+            projectName={projectName}
+            episode={episode}
+            scriptFile={scriptFile}
+            onUpdatePrompt={handleUpdatePrompt}
+            onMoveShot={handleMoveShot}
+            onInsertShot={handleInsertShot}
+            onRemoveShot={handleRemoveShot}
+            onGenerateStoryboard={handleGenSb}
+            onGenerateVideo={handleGenVid}
+            onGenerateNarration={handleGenNarration}
+            onRestoreStoryboard={onRestoreStoryboard}
+            onRestoreVideo={onRestoreVideo}
+            generatingStoryboard={generatingStoryboard}
+            generatingVideo={generatingVideo}
+            generatingNarration={generatingNarration}
+            durationOptions={durationOptions}
+            durationEndpointFixed={durationEndpointFixed}
+            lastFrame={lastFrame}
+            capabilitiesLoading={capabilitiesLoading}
+            durationWarningReason={durationWarningReason}
+          />
         ) : episodeScript && contentMode === editorContentMode ? (
           <EmptyScriptState contentMode={editorContentMode} onInsert={handleInsertShot} />
         ) : (
-          // 兜底：timeline tab 下无可编辑分镜（未知 content_mode），
-          // 或剧本回退后 tab 仍停留在 timeline——给出指引而非空白
-          <div
-            className="flex h-full items-center justify-center text-[13px]"
-            style={{ color: "var(--color-text-4)" }}
-          >
+          // 兜底：分镜视图下无可编辑分镜（未知 content_mode），
+          // 或剧本回退后仍停留在分镜视图——给出指引而非空白
+          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
             {hasScript ? t("timeline_no_editable_segments") : t("timeline_script_not_ready")}
           </div>
-        )}
+        )}>
+          {(content) => content}
+        </RetainedEditUnit>
       </div>
     </div>
   );

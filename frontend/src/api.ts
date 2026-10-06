@@ -118,7 +118,7 @@ import type {
   PresentationRequestOptions,
   PresentationResourceType,
 } from "@/types/presentation";
-import type { Asset, AssetType, AssetCreatePayload, AssetUpdatePayload } from "@/types/asset";
+import type { Asset, AssetType, AssetCreatePayload, AssetListPage, AssetUpdatePayload } from "@/types/asset";
 import type { AgentMemoryOverview, AgentMemoryScope } from "@/types/agent-memory";
 import type { EpisodeNextStep, WorkflowPlan, WorkflowPlanRequest, WorkflowStatus } from "@/types/workflow";
 import type {
@@ -185,6 +185,7 @@ import {
 } from "./api/errors";
 import type {
   AgentProfileStatus,
+  AssetDeletionPreview,
   AssetMergeResult,
   AssetRenameResult,
   AssistantEntriesStreamOptions,
@@ -215,6 +216,7 @@ export {
 } from "./api/errors";
 export type {
   AgentProfileStatus,
+  AssetDeletionPreview,
   AssetMergeEpisodeImpact,
   AssetMergeResult,
   AssetRenameResult,
@@ -362,8 +364,8 @@ class API {
 
   // ==================== 系统配置 ====================
 
-  static async getSystemConfig(): Promise<GetSystemConfigResponse> {
-    return this.request("/system/config");
+  static async getSystemConfig(options: { signal?: AbortSignal } = {}): Promise<GetSystemConfigResponse> {
+    return this.request("/system/config", { signal: options.signal });
   }
 
   /**
@@ -377,8 +379,10 @@ class API {
   }
 
   /** 新建 TTS 项目的预填值（全局默认的 TTS 模型、音色与语速）。 */
-  static async getNarrationDefaults(): Promise<NarrationDefaultsResponse> {
-    return this.request("/system/narration-defaults");
+  static async getNarrationDefaults(
+    options: { signal?: AbortSignal } = {},
+  ): Promise<NarrationDefaultsResponse> {
+    return this.request("/system/narration-defaults", { signal: options.signal });
   }
 
   /** 所选 TTS 模型（provider/model）的能力，目前只回答是否支持配音语速。 */
@@ -457,8 +461,8 @@ class API {
 
   // ==================== 项目管理 ====================
 
-  static async listProjects(): Promise<{ projects: ProjectSummary[] }> {
-    return this.request("/projects");
+  static async listProjects(options: { signal?: AbortSignal } = {}): Promise<{ projects: ProjectSummary[] }> {
+    return this.request("/projects", { signal: options.signal });
   }
 
   static async createProject(
@@ -494,8 +498,11 @@ class API {
     });
   }
 
-  static async getAgentProfileStatus(name: string): Promise<AgentProfileStatus> {
-    return this.request(`/projects/${encodeURIComponent(name)}/agent-profile`);
+  static async getAgentProfileStatus(
+    name: string,
+    options: { signal?: AbortSignal } = {}
+  ): Promise<AgentProfileStatus> {
+    return this.request(`/projects/${encodeURIComponent(name)}/agent-profile`, { signal: options.signal });
   }
 
   static async resetAgentProfile(name: string): Promise<AgentProfileStatus> {
@@ -878,18 +885,6 @@ class API {
     );
   }
 
-  static async deleteCharacter(
-    projectName: string,
-    charName: string
-  ): Promise<SuccessResponse> {
-    return this.request(
-      `/projects/${encodeURIComponent(projectName)}/characters/${encodeURIComponent(charName)}`,
-      {
-        method: "DELETE",
-      }
-    );
-  }
-
   // ==================== 角色衍生管理 ====================
 
   /**
@@ -996,11 +991,13 @@ class API {
   /** 规划一批但不建任务：要生成的名单、跳过项与能算出时的预估费用。 */
   static async previewAssetSheetBatch(
     projectName: string,
-    scope: AssetSheetBatchScope
+    scope: AssetSheetBatchScope,
+    options?: { signal?: AbortSignal }
   ): Promise<AssetSheetBatchPreview> {
     return this.request(`/projects/${encodeURIComponent(projectName)}/asset-sheets/batch/preview`, {
       method: "POST",
       body: JSON.stringify(scope),
+      signal: options?.signal,
     });
   }
 
@@ -1044,11 +1041,13 @@ class API {
     projectName: string,
     assetType: AssetSheetType,
     name: string,
-    derivativeName?: string
+    derivativeName?: string,
+    options?: { signal?: AbortSignal },
   ): Promise<AssetRegenerationImpact> {
     const query = derivativeName ? `?${new URLSearchParams({ derivative_name: derivativeName })}` : "";
     return this.request(
-      `/projects/${encodeURIComponent(projectName)}/asset-sheets/${assetType}/${encodeURIComponent(name)}/regeneration-impact${query}`
+      `/projects/${encodeURIComponent(projectName)}/asset-sheets/${assetType}/${encodeURIComponent(name)}/regeneration-impact${query}`,
+      { signal: options?.signal },
     );
   }
 
@@ -1078,18 +1077,6 @@ class API {
       {
         method: "PATCH",
         body: JSON.stringify(updates),
-      }
-    );
-  }
-
-  static async deleteProjectScene(
-    projectName: string,
-    sceneName: string
-  ): Promise<SuccessResponse> {
-    return this.request(
-      `/projects/${encodeURIComponent(projectName)}/scenes/${encodeURIComponent(sceneName)}`,
-      {
-        method: "DELETE",
       }
     );
   }
@@ -1124,31 +1111,25 @@ class API {
     );
   }
 
-  static async deleteProjectProp(
-    projectName: string,
-    propName: string
-  ): Promise<SuccessResponse> {
-    return this.request(
-      `/projects/${encodeURIComponent(projectName)}/props/${encodeURIComponent(propName)}`,
-      {
-        method: "DELETE",
-      }
-    );
-  }
-
   // ==================== 项目商品管理 ====================
 
   static async addProjectProduct(
     projectName: string,
     name: string,
     description: string,
-    brand?: string
+    brand?: string,
+    sellingPoints?: string[]
   ): Promise<SuccessResponse> {
     return this.request(
       `/projects/${encodeURIComponent(projectName)}/products`,
       {
         method: "POST",
-        body: JSON.stringify(brand ? { name, description, brand } : { name, description }),
+        body: JSON.stringify({
+          name,
+          description,
+          ...(brand ? { brand } : {}),
+          ...(sellingPoints?.length ? { selling_points: sellingPoints } : {}),
+        }),
       }
     );
   }
@@ -1163,18 +1144,6 @@ class API {
       {
         method: "PATCH",
         body: JSON.stringify(updates),
-      }
-    );
-  }
-
-  static async deleteProjectProduct(
-    projectName: string,
-    productName: string
-  ): Promise<SuccessResponse> {
-    return this.request(
-      `/projects/${encodeURIComponent(projectName)}/products/${encodeURIComponent(productName)}`,
-      {
-        method: "DELETE",
       }
     );
   }
@@ -1224,6 +1193,33 @@ class API {
         }),
         signal: options.signal,
       }
+    );
+  }
+
+  /**
+   * 删除项目内资产前的引用预览：脚本与草稿里有多少处引用会在删除后悬空，按集列出。只读，
+   * 与重命名同一套扫描。删除本身不改写这些引用，也不因有引用而拒绝。
+   */
+  static async previewProjectAssetDeletion(
+    projectName: string,
+    assetType: ProjectAssetType,
+    name: string,
+    options: { signal?: AbortSignal } = {}
+  ): Promise<AssetDeletionPreview> {
+    return this.request(
+      `/projects/${encodeURIComponent(projectName)}/${ASSET_TYPE_PATH[assetType]}/${encodeURIComponent(name)}?dry_run=true`,
+      { method: "DELETE", signal: options.signal }
+    );
+  }
+
+  static async deleteProjectAsset(
+    projectName: string,
+    assetType: ProjectAssetType,
+    name: string
+  ): Promise<SuccessResponse> {
+    return this.request(
+      `/projects/${encodeURIComponent(projectName)}/${ASSET_TYPE_PATH[assetType]}/${encodeURIComponent(name)}`,
+      { method: "DELETE" }
     );
   }
 
@@ -2254,12 +2250,14 @@ class API {
    * 使用 AI 生成项目概述
    */
   static async generateOverview(
-    projectName: string
+    projectName: string,
+    options: { signal?: AbortSignal } = {}
   ): Promise<{ success: boolean; overview: ProjectOverview }> {
     return this.request(
       `/projects/${encodeURIComponent(projectName)}/generate-overview`,
       {
         method: "POST",
+        signal: options.signal,
       }
     );
   }
@@ -2705,14 +2703,15 @@ class API {
   static async getVersions(
     projectName: string,
     resourceType: string,
-    resourceId: string
+    resourceId: string,
+    options?: { signal?: AbortSignal },
   ): Promise<{
     resource_type: string;
     resource_id: string;
     current_version: number;
     versions: VersionInfo[];
   }> {
-    return this.request(versionsResourcePath(projectName, resourceType, resourceId));
+    return this.request(versionsResourcePath(projectName, resourceType, resourceId), { signal: options?.signal });
   }
 
   /**
@@ -2995,8 +2994,8 @@ class API {
   // ==================== API Key 管理 API ====================
 
   /** 列出所有 API Key（不含完整 key）。 */
-  static async listApiKeys(): Promise<ApiKeyInfo[]> {
-    return this.request("/api-keys");
+  static async listApiKeys(options: { signal?: AbortSignal } = {}): Promise<ApiKeyInfo[]> {
+    return this.request("/api-keys", { signal: options.signal });
   }
 
   /** 创建新 API Key，返回含完整 key 的响应（仅此一次）。 */
@@ -3050,8 +3049,8 @@ class API {
 
   // ==================== Provider 凭证管理 API ====================
 
-  static async listCredentials(providerId: string): Promise<{ credentials: ProviderCredential[] }> {
-    return this.request(`/providers/${encodeURIComponent(providerId)}/credentials`);
+  static async listCredentials(providerId: string, options: { signal?: AbortSignal } = {}): Promise<{ credentials: ProviderCredential[] }> {
+    return this.request(`/providers/${encodeURIComponent(providerId)}/credentials`, { signal: options.signal });
   }
 
   static async createCredential(
@@ -3103,12 +3102,12 @@ class API {
 
   // ==================== Agent 配置 / 凭证 API ====================
 
-  static async listAgentPresetProviders(): Promise<PresetProvidersResponse> {
-    return this.request("/agent/preset-providers");
+  static async listAgentPresetProviders(options: { signal?: AbortSignal } = {}): Promise<PresetProvidersResponse> {
+    return this.request("/agent/preset-providers", { signal: options.signal });
   }
 
-  static async listAgentCredentials(): Promise<{ credentials: AgentCredential[] }> {
-    return this.request("/agent/credentials");
+  static async listAgentCredentials(options: { signal?: AbortSignal } = {}): Promise<{ credentials: AgentCredential[] }> {
+    return this.request("/agent/credentials", { signal: options.signal });
   }
 
   static async createAgentCredential(
@@ -3167,8 +3166,8 @@ class API {
     return this.request("/custom-providers", { method: "POST", body: JSON.stringify(data) });
   }
 
-  static async getCustomProvider(id: number): Promise<CustomProviderInfo> {
-    return this.request(`/custom-providers/${id}`);
+  static async getCustomProvider(id: number, options: { signal?: AbortSignal } = {}): Promise<CustomProviderInfo> {
+    return this.request(`/custom-providers/${id}`, { signal: options.signal });
   }
 
   static async updateCustomProvider(id: number, data: Partial<Omit<CustomProviderCreateRequest, "discovery_format" | "models" | "image_max_workers" | "video_max_workers" | "audio_max_workers">>): Promise<void> {
@@ -3418,8 +3417,8 @@ class API {
   }
 
   /** 内置声明式端点的定义原样 JSON，供「复制为我的」；Python 实现的内置端点 404。 */
-  static async getBuiltinEndpointDefinition(key: string): Promise<EndpointDefinition> {
-    return this.request(`/custom-providers/endpoints/${encodeURIComponent(key)}/definition`);
+  static async getBuiltinEndpointDefinition(key: string, options: { signal?: AbortSignal } = {}): Promise<EndpointDefinition> {
+    return this.request(`/custom-providers/endpoints/${encodeURIComponent(key)}/definition`, { signal: options.signal });
   }
 
   static async previewEndpointRequest(
@@ -3562,8 +3561,14 @@ class API {
    * @param projectName - 项目名称
    * @param gridId - Grid ID
    */
-  static async getGrid(projectName: string, gridId: string): Promise<GridGeneration> {
-    return this.request(`/projects/${encodeURIComponent(projectName)}/grids/${encodeURIComponent(gridId)}`);
+  static async getGrid(
+    projectName: string,
+    gridId: string,
+    options: { signal?: AbortSignal } = {}
+  ): Promise<GridGeneration> {
+    return this.request(`/projects/${encodeURIComponent(projectName)}/grids/${encodeURIComponent(gridId)}`, {
+      signal: options.signal,
+    });
   }
 
   /**
@@ -3628,7 +3633,7 @@ class API {
     if (params.q) usp.set("q", params.q);
     if (params.limit) usp.set("limit", String(params.limit));
     if (params.offset) usp.set("offset", String(params.offset));
-    return this.request<{ items: Asset[] }>(`/assets?${usp.toString()}`, options);
+    return this.request<AssetListPage>(`/assets?${usp.toString()}`, options);
   }
 
   static async getAsset(id: string) {

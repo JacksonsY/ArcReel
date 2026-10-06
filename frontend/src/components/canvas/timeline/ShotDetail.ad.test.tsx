@@ -175,7 +175,7 @@ describe("ShotDetail 广告/短片", () => {
     expect(screen.getByText("尾帧")).toBeInTheDocument();
   });
 
-  it("有口播的分镜生成视频只提交分镜 ID，不提供旁白交付选择也不触发 TTS", () => {
+  it("有口播的分镜生成视频只提交分镜 ID，不提供旁白交付选择也不触发 TTS", async () => {
     const onGenerateVideo = vi.fn();
     const onGenerateNarration = vi.fn();
     renderDetail({
@@ -199,7 +199,7 @@ describe("ShotDetail 广告/短片", () => {
     expect(screen.queryByRole("button", { name: "后期配音" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "生成视频" }));
 
-    expect(onGenerateVideo).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(onGenerateVideo).toHaveBeenCalledTimes(1));
     expect(onGenerateVideo.mock.calls[0]).toEqual(["E1S01"]);
     expect(onGenerateNarration).not.toHaveBeenCalled();
   });
@@ -213,8 +213,8 @@ describe("ShotDetail 广告/短片", () => {
     expect(screen.getByRole("button", { name: "上一镜" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "下一镜" })).toBeDisabled();
     // tooltip 解释禁用原因，而非展示常规操作提示
-    expect(screen.getByRole("button", { name: "上一镜" })).toHaveAttribute("title", "重排进行中…");
-    expect(screen.getByRole("button", { name: "前移分镜" })).toHaveAttribute("title", "重排进行中…");
+    expect(screen.getByRole("button", { name: "上一镜" })).toHaveAccessibleDescription("重排进行中…");
+    expect(screen.getByRole("button", { name: "前移分镜" })).toHaveAccessibleDescription("重排进行中…");
   });
 
   it("新增 / 移除分镜：移除取消不调用，分镜生成在跑时禁止移除", async () => {
@@ -226,7 +226,7 @@ describe("ShotDetail 广告/短片", () => {
     await waitFor(() => expect(onInsertShot).toHaveBeenCalledWith("E1S01", undefined));
 
     fireEvent.click(screen.getByRole("button", { name: "移除分镜" }));
-    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "取消" }));
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "取消" }));
     expect(onRemoveShot).not.toHaveBeenCalled();
     unmount();
 
@@ -234,7 +234,7 @@ describe("ShotDetail 广告/短片", () => {
     expect(screen.getByRole("button", { name: "移除分镜" })).toBeDisabled();
   });
 
-  it("移除确认框打开后分镜开始生成：确认按钮随之禁用，不调用移除", () => {
+  it("移除确认框打开后分镜开始生成：确认按钮随之禁用，不调用移除", async () => {
     const onRemoveShot = vi.fn().mockResolvedValue(true);
     const shot = makeShot();
     const detail = (generatingVideo: boolean) => (
@@ -259,7 +259,7 @@ describe("ShotDetail 广告/短片", () => {
     fireEvent.click(screen.getByRole("button", { name: "移除分镜" }));
 
     rerender(detail(true));
-    const confirm = within(screen.getByRole("dialog")).getByRole("button", { name: "移除分镜" });
+    const confirm = within(await screen.findByRole("alertdialog")).getByRole("button", { name: "移除分镜" });
     expect(confirm).toBeDisabled();
     fireEvent.click(confirm);
 

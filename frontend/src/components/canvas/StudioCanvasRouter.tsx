@@ -1,27 +1,23 @@
 import { useCallback, useRef } from "react";
 import { errMsg, voidPromise } from "@/utils/async";
-import { Route, Switch, Redirect, useSearchParams } from "wouter";
+import { Route, Switch, Redirect } from "wouter";
 import {
-  WORKSPACE_ROUTE_LOREBOOK,
-  WORKSPACE_ROUTE_CLUES,
   WORKSPACE_ROUTE_CHARACTERS,
   WORKSPACE_ROUTE_SCENES,
   WORKSPACE_ROUTE_PROPS,
   WORKSPACE_ROUTE_PRODUCTS,
   WORKSPACE_ROUTE_EPISODES,
-  EPISODE_VIEW_EDIT,
-  EPISODE_VIEW_PARAM,
 } from "@/app-routes";
 import { useTranslation } from "react-i18next";
 import { useProjectsStore } from "@/stores/projects-store";
 import { useDemoWorkbench } from "@/onboarding/use-demo-workbench";
 import { isDemoProject } from "@/onboarding/demo-project";
-import { DemoEpisodePlaceholder } from "@/onboarding/DemoEpisodePlaceholder";
 import { useAppStore } from "@/stores/app-store";
 import { useConfigStatusStore } from "@/stores/config-status-store";
 import { useActiveResourceIds } from "@/stores/tasks-store";
 import { TimelineCanvas } from "./timeline/TimelineCanvas";
-import { OverviewCanvas } from "./OverviewCanvas";
+import { OverviewCanvas } from "./overview/OverviewCanvas";
+import { WorkspaceNotFound } from "./WorkspaceNotFound";
 import { EpisodesView } from "./episodes/EpisodesView";
 import { CharactersPage } from "./lorebook/CharactersPage";
 import { ScenesPage } from "./lorebook/ScenesPage";
@@ -29,25 +25,8 @@ import { PropsPage } from "./lorebook/PropsPage";
 import { ProductsPage } from "./lorebook/ProductsPage";
 import { ReferenceVideoCanvas } from "./reference/ReferenceVideoCanvas";
 import { GridImageToVideoCanvas } from "./grid/GridImageToVideoCanvas";
-import { EpisodeSourceReview } from "./EpisodeSourceReview";
-import { EditTimelineView } from "./edit/EditTimelineView";
-import { EditTimelineEmptyState } from "./edit-render/EditTimelineEmptyState";
-import { RenderButton } from "./edit-render/RenderButton";
-import {
-  EPISODE_VIEW_PANEL_ID,
-  EpisodeViewSwitch,
-  episodeViewOf,
-  episodeViewTabId,
-  type EpisodeView,
-} from "./EpisodeViewSwitch";
-import { WorkflowPanel } from "@/components/workflow/WorkflowPanel";
+import { EpisodePage } from "./episode-page/EpisodePage";
 import { API } from "@/api";
-import { PromptAuthoringHost } from "@/components/canvas/shared/PromptAuthoringDialog";
-import { usePromptAuthoringStore } from "@/stores/prompt-authoring-store";
-import { ScriptPlanHost } from "@/components/canvas/shared/ScriptPlanDialog";
-import { previewAspect } from "@/utils/preview-aspect";
-import { TextTaskFailureNote } from "@/components/canvas/shared/TextTaskFailureNote";
-import { AdScriptHost } from "@/components/canvas/shared/AdScriptDialog";
 import {
   enqueueCharacter,
   enqueueEpisodeNarration,
@@ -59,17 +38,11 @@ import {
   enqueueStoryboard,
   enqueueVideo,
 } from "@/actions/generation";
-import { buildEntityRevisionKey } from "@/utils/project-changes";
 import {
   durationOutOfRangeReason,
   useModelCapabilities,
 } from "@/hooks/useModelCapabilities";
 import { gridStoryboardEnabled, normalizeRoute } from "@/utils/generation-mode";
-import type {
-  Scene,
-  Prop,
-  Product,
-} from "@/types";
 import type { EpisodeScript } from "@/types/script";
 
 /** 集级路由 path，与渲染该集的 `<Route>` 共用一份。 */
@@ -117,14 +90,6 @@ export function StudioCanvasRouter() {
   tRef.current = t;
   const { currentProjectData, currentProjectName, currentScripts, projectDetailLoading } =
     useProjectsStore();
-  const [searchParams, setSearchParams] = useSearchParams();
-  const episodeView = episodeViewOf(searchParams);
-  const setEpisodeView = (view: EpisodeView) =>
-    setSearchParams((params) => {
-      if (view === "edit") params.set(EPISODE_VIEW_PARAM, EPISODE_VIEW_EDIT);
-      else params.delete(EPISODE_VIEW_PARAM);
-      return params;
-    });
   // 演示态：资产画布仍走 readOnly 透传，工作台时间线的只读则由组件自己直读同一判定。
   // useDemoWorkbench() 已把路由参数与 store 的判定滞后收口在单一来源，此处直接消费。
   const demoMode = useDemoWorkbench();
@@ -166,48 +131,25 @@ export function StudioCanvasRouter() {
 
   // ---- Timeline action callbacks ----
   // These receive scriptFile from TimelineCanvas so they always use the active episode's script.
-  // 返回是否写入成功：本函数内部吞掉异常并转 toast，调用方靠返回值而非
-  // "是否抛出"判断能否清空本地草稿——不依赖此契约的调用方
-  // （TimelineCanvas / GridImageToVideoCanvas）按 void 用即可，多出的返回值不影响它们。
+  // 分镜详情编辑单元的保存：PATCH 失败时如实抛错，由编辑单元显示在未保存提示条上。
+  // resolve 为本地 store 是否已同步到新剧本；PATCH 已落库但刷新失败或被取消时为 false，
+  // 此时 store 仍是旧剧本，接着生成会拿旧提示词入队，调用方据此不再继续生成。
   const handleUpdatePrompt = useCallback(async (
     segmentId: string,
-    fieldOrPatch: string | Record<string, unknown>,
-    value?: unknown,
+    patch: Record<string, unknown>,
     scriptFile?: string,
   ): Promise<boolean> => {
-    if (!currentProjectName) return false;
+    if (!currentProjectName) throw new Error(tRef.current("common:no_project_selected"));
     const mode = currentProjectData?.content_mode ?? "narration";
-    const patch =
-      typeof fieldOrPatch === "string"
-        ? { [fieldOrPatch]: value }
-        : fieldOrPatch;
-    try {
-      if (mode === "ad") {
-        await API.updateShot(currentProjectName, segmentId, scriptFile ?? "", patch);
-      } else if (mode === "drama") {
-        await API.updateScene(currentProjectName, segmentId, scriptFile ?? "", patch);
-      } else {
-        await API.updateSegment(currentProjectName, segmentId, { script_file: scriptFile, ...patch });
-      }
-      // 仅在本地 store 已同步成功时报告成功：PATCH 已落库但刷新失败/取消时 store
-      // 仍是旧剧本，此时报告成功会让调用方清空草稿却回显旧值——与 handleMoveShot 同一契约。
-      return await refreshProject();
-    } catch (err) {
-      useAppStore.getState().pushToast(tRef.current("update_prompt_failed", { message: errMsg(err) }), "error");
-      return false;
+    if (mode === "ad") {
+      await API.updateShot(currentProjectName, segmentId, scriptFile ?? "", patch);
+    } else if (mode === "drama") {
+      await API.updateScene(currentProjectName, segmentId, scriptFile ?? "", patch);
+    } else {
+      await API.updateSegment(currentProjectName, segmentId, { script_file: scriptFile, ...patch });
     }
+    return refreshProject();
   }, [currentProjectName, currentProjectData, refreshProject]);
-
-  // 不走 voidPromise（见其 JSDoc）：ShotDetail.handleSave / handleRefsSave 靠
-  // await 这个回调维持保存中状态——真正要丢弃的只是布尔返回值，等待本身必须
-  // 原样保留。TimelineCanvas 与 GridImageToVideoCanvas 均不消费返回值，共用
-  // 同一适配回调。
-  const awaitedUpdatePrompt = useCallback(
-    async (...args: Parameters<typeof handleUpdatePrompt>) => {
-      await handleUpdatePrompt(...args);
-    },
-    [handleUpdatePrompt],
-  );
 
   // 分镜改序（各形态通用）：把分镜移到 afterId 之后，null 移到最前。
   // 返回是否移动成功，供编辑器把选中态跟随到分镜的新位置。
@@ -277,16 +219,18 @@ export function StudioCanvasRouter() {
     try {
       await API.updateEpisode(currentProjectName, episode, { title });
       await refreshProject();
-      useAppStore.getState().pushToast(tRef.current("episode_title_updated"), "success");
     } catch (err) {
       useAppStore.getState().pushToast(tRef.current("episode_title_update_failed", { message: errMsg(err) }), "error");
       throw err; // 让 EditableEpisodeTitle 保持编辑态，不误清空
     }
   }, [currentProjectName, refreshProject]);
 
+  // 生成回调在调用时读 store 里的最新剧本，不用渲染时的闭包：「保存并生成」在同一次点击里先保存、
+  // 刷新剧本再生成，此刻调用的仍是点击前那次渲染的回调，闭包里是保存前的提示词。
   const handleGenerateStoryboard = useCallback(async (segmentId: string, scriptFile?: string) => {
-    if (!currentProjectName || !currentScripts) return;
-    const resolved = resolveSegmentPrompt(currentScripts, segmentId, "image_prompt", scriptFile);
+    const scripts = useProjectsStore.getState().currentScripts;
+    if (!currentProjectName || !scripts) return;
+    const resolved = resolveSegmentPrompt(scripts, segmentId, "image_prompt", scriptFile);
     if (!resolved) return;
     try {
       await enqueueStoryboard(
@@ -298,11 +242,12 @@ export function StudioCanvasRouter() {
     } catch (err) {
       useAppStore.getState().pushToast(tRef.current("generate_storyboard_failed", { message: errMsg(err) }), "error");
     }
-  }, [currentProjectName, currentScripts]);
+  }, [currentProjectName]);
 
   const handleGenerateVideo = useCallback(async (segmentId: string, scriptFile?: string) => {
-    if (!currentProjectName || !currentScripts) return;
-    const resolved = resolveSegmentPrompt(currentScripts, segmentId, "video_prompt", scriptFile);
+    const scripts = useProjectsStore.getState().currentScripts;
+    if (!currentProjectName || !scripts) return;
+    const resolved = resolveSegmentPrompt(scripts, segmentId, "video_prompt", scriptFile);
     if (!resolved) return;
     try {
       await enqueueVideo(
@@ -315,7 +260,7 @@ export function StudioCanvasRouter() {
     } catch (err) {
       useAppStore.getState().pushToast(tRef.current("generate_video_failed", { message: errMsg(err) }), "error");
     }
-  }, [currentProjectName, currentScripts]);
+  }, [currentProjectName]);
 
   // 未配置 audio 供应商时在前端就给出清晰提示（后端入队前还有同语义的 400 兜底）
   const ensureAudioProviderConfigured = useCallback((): boolean => {
@@ -392,54 +337,7 @@ export function StudioCanvasRouter() {
     handleGenerateVideo,
   ]);
 
-  // ---- Character CRUD callbacks ----
-  const handleSaveCharacter = useCallback(async (
-    name: string,
-    payload: {
-      description: string;
-      voiceStyle: string;
-      referenceFile?: File | null;
-      audioFile?: File | null;
-    },
-  ) => {
-    if (!currentProjectName) return;
-    const invalidateKeys = payload.referenceFile || payload.audioFile
-      ? [buildEntityRevisionKey("character", name)]
-      : [];
-    try {
-      await API.updateCharacter(currentProjectName, name, {
-        description: payload.description,
-        voice_style: payload.voiceStyle,
-      });
-
-      if (payload.referenceFile) {
-        await API.uploadFile(
-          currentProjectName,
-          "character_ref",
-          payload.referenceFile,
-          name,
-        );
-      }
-
-      if (payload.audioFile) {
-        await API.uploadFile(
-          currentProjectName,
-          "character_audio_ref",
-          payload.audioFile,
-          name,
-        );
-      }
-
-      useAppStore.getState().pushToast(tRef.current("character_updated_toast", { name }), "success");
-    } catch (err) {
-      useAppStore.getState().pushToast(tRef.current("update_character_failed", { message: errMsg(err) }), "error");
-    } finally {
-      // 三步写操作顺序执行，任一步失败时前面已持久化的变更（描述/参考图）也要反映到本地
-      // store，否则用户会误以为整个保存失败而重复提交
-      await refreshProject(invalidateKeys);
-    }
-  }, [currentProjectName, refreshProject]);
-
+  // ---- Asset sheet generation callbacks ----
   const handleGenerateCharacter = useCallback(async (name: string) => {
     if (!currentProjectName) return;
     try {
@@ -448,43 +346,6 @@ export function StudioCanvasRouter() {
       useAppStore.getState().pushToast(tRef.current("submit_failed", { message: errMsg(err) }), "error");
     }
   }, [currentProjectName]);
-
-  const handleAddCharacterSubmit = useCallback(async (
-    name: string,
-    description: string,
-    voiceStyle: string,
-    referenceFile?: File | null,
-  ) => {
-    if (!currentProjectName) return;
-    try {
-      await API.addCharacter(currentProjectName, name, description, voiceStyle);
-
-      if (referenceFile) {
-        await API.uploadFile(currentProjectName, "character_ref", referenceFile, name);
-      }
-
-      await refreshProject(
-        referenceFile
-          ? [buildEntityRevisionKey("character", name)]
-          : [],
-      );
-      useAppStore.getState().pushToast(tRef.current("character_added_toast", { name }), "success");
-    } catch (err) {
-      useAppStore.getState().pushToast(tRef.current("add_failed", { message: errMsg(err) }), "error");
-      throw err; // AssetFormModal onSubmit 消费：失败时阻止 setAdding(false) 关闭对话框
-    }
-  }, [currentProjectName, refreshProject]);
-
-  // ---- Scene CRUD callbacks ----
-  const handleUpdateScene = useCallback(async (name: string, updates: Partial<Scene>) => {
-    if (!currentProjectName) return;
-    try {
-      await API.updateProjectScene(currentProjectName, name, updates);
-      await refreshProject();
-    } catch (err) {
-      useAppStore.getState().pushToast(tRef.current("update_scene_failed", { message: errMsg(err) }), "error");
-    }
-  }, [currentProjectName, refreshProject]);
 
   const handleGenerateScene = useCallback(async (name: string) => {
     if (!currentProjectName) return;
@@ -495,29 +356,6 @@ export function StudioCanvasRouter() {
     }
   }, [currentProjectName]);
 
-  const handleAddSceneSubmit = useCallback(async (name: string, description: string) => {
-    if (!currentProjectName) return;
-    try {
-      await API.addProjectScene(currentProjectName, name, description);
-      await refreshProject();
-      useAppStore.getState().pushToast(tRef.current("scene_added_toast", { name }), "success");
-    } catch (err) {
-      useAppStore.getState().pushToast(tRef.current("add_failed", { message: errMsg(err) }), "error");
-      throw err; // AssetFormModal onSubmit 消费：失败时阻止 setAdding(false) 关闭对话框
-    }
-  }, [currentProjectName, refreshProject]);
-
-  // ---- Prop CRUD callbacks ----
-  const handleUpdateProp = useCallback(async (name: string, updates: Partial<Prop>) => {
-    if (!currentProjectName) return;
-    try {
-      await API.updateProjectProp(currentProjectName, name, updates);
-      await refreshProject();
-    } catch (err) {
-      useAppStore.getState().pushToast(tRef.current("update_prop_failed", { message: errMsg(err) }), "error");
-    }
-  }, [currentProjectName, refreshProject]);
-
   const handleGenerateProp = useCallback(async (name: string) => {
     if (!currentProjectName) return;
     try {
@@ -527,29 +365,6 @@ export function StudioCanvasRouter() {
     }
   }, [currentProjectName]);
 
-  const handleAddPropSubmit = useCallback(async (name: string, description: string) => {
-    if (!currentProjectName) return;
-    try {
-      await API.addProjectProp(currentProjectName, name, description);
-      await refreshProject();
-      useAppStore.getState().pushToast(tRef.current("prop_added_toast", { name }), "success");
-    } catch (err) {
-      useAppStore.getState().pushToast(tRef.current("add_failed", { message: errMsg(err) }), "error");
-      throw err; // AssetFormModal onSubmit 消费：失败时阻止 setAdding(false) 关闭对话框
-    }
-  }, [currentProjectName, refreshProject]);
-
-  // ---- Product CRUD callbacks ----
-  const handleUpdateProduct = useCallback(async (name: string, updates: Partial<Product>) => {
-    if (!currentProjectName) return;
-    try {
-      await API.updateProjectProduct(currentProjectName, name, updates);
-      await refreshProject();
-    } catch (err) {
-      useAppStore.getState().pushToast(tRef.current("update_product_failed", { message: errMsg(err) }), "error");
-    }
-  }, [currentProjectName, refreshProject]);
-
   const handleGenerateProduct = useCallback(async (name: string) => {
     if (!currentProjectName) return;
     try {
@@ -558,18 +373,6 @@ export function StudioCanvasRouter() {
       useAppStore.getState().pushToast(tRef.current("submit_failed", { message: errMsg(err) }), "error");
     }
   }, [currentProjectName]);
-
-  const handleAddProductSubmit = useCallback(async (name: string, description: string, brand: string) => {
-    if (!currentProjectName) return;
-    try {
-      await API.addProjectProduct(currentProjectName, name, description, brand || undefined);
-      await refreshProject();
-      useAppStore.getState().pushToast(tRef.current("product_added_toast", { name }), "success");
-    } catch (err) {
-      useAppStore.getState().pushToast(tRef.current("add_failed", { message: errMsg(err) }), "error");
-      throw err; // ProductFormModal onSubmit 消费：失败时阻止关闭对话框
-    }
-  }, [currentProjectName, refreshProject]);
 
   const handleGenerateGrid = useCallback(async (episode: number, scriptFile: string, sceneIds?: string[]) => {
     if (!currentProjectName) return;
@@ -587,21 +390,12 @@ export function StudioCanvasRouter() {
   const handleGenerateCharacterVoid = useCallback((...args: Parameters<typeof handleGenerateCharacter>) => {
     void handleGenerateCharacter(...args).catch(console.error);
   }, [handleGenerateCharacter]);
-  const handleUpdateSceneVoid = useCallback((...args: Parameters<typeof handleUpdateScene>) => {
-    void handleUpdateScene(...args).catch(console.error);
-  }, [handleUpdateScene]);
   const handleGenerateSceneVoid = useCallback((...args: Parameters<typeof handleGenerateScene>) => {
     void handleGenerateScene(...args).catch(console.error);
   }, [handleGenerateScene]);
-  const handleUpdatePropVoid = useCallback((...args: Parameters<typeof handleUpdateProp>) => {
-    void handleUpdateProp(...args).catch(console.error);
-  }, [handleUpdateProp]);
   const handleGeneratePropVoid = useCallback((...args: Parameters<typeof handleGenerateProp>) => {
     void handleGenerateProp(...args).catch(console.error);
   }, [handleGenerateProp]);
-  const handleUpdateProductVoid = useCallback((...args: Parameters<typeof handleUpdateProduct>) => {
-    void handleUpdateProduct(...args).catch(console.error);
-  }, [handleUpdateProduct]);
   const handleGenerateProductVoid = useCallback((...args: Parameters<typeof handleGenerateProduct>) => {
     void handleGenerateProduct(...args).catch(console.error);
   }, [handleGenerateProduct]);
@@ -627,14 +421,6 @@ export function StudioCanvasRouter() {
         />
       </Route>
 
-      <Route path={`/${WORKSPACE_ROUTE_LOREBOOK}`}>
-        <Redirect to={`/${WORKSPACE_ROUTE_CHARACTERS}`} />
-      </Route>
-
-      <Route path={`/${WORKSPACE_ROUTE_CLUES}`}>
-        <Redirect to={`/${WORKSPACE_ROUTE_SCENES}`} />
-      </Route>
-
       <Route path={`/${WORKSPACE_ROUTE_EPISODES}`}>
         {/* 演示项目后端不存在，广告/短片恒单集、不经分集；侧栏已隐藏入口，这里兜底直接输入 URL 的情形 */}
         {demoMode || currentProjectData?.content_mode === "ad" ? (
@@ -650,13 +436,10 @@ export function StudioCanvasRouter() {
           projectName={currentProjectName}
           characters={currentProjectData?.characters ?? {}}
           readOnly={demoMode}
-          onSaveCharacter={handleSaveCharacter}
           onGenerateCharacter={handleGenerateCharacterVoid}
-          onAddCharacter={handleAddCharacterSubmit}
           onRestoreCharacterVersion={handleRestoreAsset}
           onRefreshProject={refreshProject}
           generatingCharacterNames={generatingCharacterNames}
-          voiceBinding={currentProjectData?.character_voice_binding}
         />
       </Route>
 
@@ -666,9 +449,7 @@ export function StudioCanvasRouter() {
           projectName={currentProjectName}
           scenes={currentProjectData?.scenes ?? {}}
           readOnly={demoMode}
-          onUpdateScene={handleUpdateSceneVoid}
           onGenerateScene={handleGenerateSceneVoid}
-          onAddScene={handleAddSceneSubmit}
           onRestoreSceneVersion={handleRestoreAsset}
           onRefreshProject={refreshProject}
           generatingSceneNames={generatingSceneNames}
@@ -681,9 +462,7 @@ export function StudioCanvasRouter() {
           projectName={currentProjectName}
           props={currentProjectData?.props ?? {}}
           readOnly={demoMode}
-          onUpdateProp={handleUpdatePropVoid}
           onGenerateProp={handleGeneratePropVoid}
-          onAddProp={handleAddPropSubmit}
           onRestorePropVersion={handleRestoreAsset}
           onRefreshProject={refreshProject}
           generatingPropNames={generatingPropNames}
@@ -696,9 +475,7 @@ export function StudioCanvasRouter() {
           projectName={currentProjectName}
           products={currentProjectData?.products ?? {}}
           readOnly={demoMode}
-          onUpdateProduct={handleUpdateProductVoid}
           onGenerateProduct={handleGenerateProductVoid}
-          onAddProduct={handleAddProductSubmit}
           onRestoreProductVersion={handleRestoreAsset}
           onRefreshProject={refreshProject}
           generatingProductNames={generatingProductNames}
@@ -725,112 +502,25 @@ export function StudioCanvasRouter() {
           const hasDraft =
             episode?.script_status === "segmented" || episode?.script_status === "generated";
           const isAd = currentProjectData?.content_mode === "ad";
-
-          // 已选集但剧本未生成：进入脚本规划视图（narration/drama 全部生成路径——
-          // reference_video 此时 units 为空，同样没有可展示内容）；ad 恒单集无源文
-          // 切片，走各自画布。
-          // 演示项目没有源文可切片，缺剧本的分集直接说明「演示只做到第 1 集」
-          const showSourceReview =
-            Boolean(episode) && !script && !hasDraft && !isAd && !demoMode;
-          // 剪辑视图预览按剪辑时间线拼接的视频，需要本集已有正式脚本；演示态不提供。
-          const canEdit = Boolean(script) && !demoMode;
-          const showEditView = canEdit && episodeView === "edit";
-
           return (
-            <div className="flex h-full flex-col">
-              {/* 演示态没有真实项目事实可投影，面板不挂载。 */}
-              {!demoMode && currentProjectName && (
-                <WorkflowPanel
-                  projectName={currentProjectName}
-                  episode={epNum}
-                  onViewUnit={handleViewWorkflowUnit}
-                  // 参考生视频的视频入队由 ReferenceVideoCanvas 自己的整批准入判定路径承担，
-                  // 本组件的逐单元回调对 video_units 剧本解不出提示词、按下去毫无反应。
-                  // 该生成模式只给「查看」跳转，重生入口在跳过去的那张单元卡上。
-                  onRegenerate={
-                    route === "reference_video" || !scriptFile
-                      ? undefined
-                      : (stepId, unitIds) =>
-                          void handleWorkflowRegenerate(stepId, unitIds, scriptFile)
-                  }
-                  onAuthorPrompts={
-                    script
-                      ? () => usePromptAuthoringStore.getState().open({ projectName: currentProjectName, episode: epNum, scope: "pending" })
-                      : undefined
-                  }
-                />
-              )}
-              {!demoMode && currentProjectName && (
-                <TextTaskFailureNote
-                  projectName={currentProjectName}
-                  episode={epNum}
-                  isAd={isAd}
-                  hasScript={Boolean(script)}
-                />
-              )}
-              {!demoMode && currentProjectName && (
-                <ScriptPlanHost
-                  projectName={currentProjectName}
-                  episode={epNum}
-                  savedInstructions={episode?.script_plan_instructions}
-                />
-              )}
-              {!demoMode && currentProjectName && isAd && (
-                <AdScriptHost projectName={currentProjectName} episode={epNum} />
-              )}
-              {!demoMode && currentProjectName && (
-                <PromptAuthoringHost
-                  projectName={currentProjectName}
-                  episode={epNum}
-                  script={script}
-                  savedInstructions={episode?.prompt_authoring_instructions}
-                />
-              )}
-              {canEdit && <EpisodeViewSwitch view={episodeView} onChange={setEpisodeView} />}
-              <div
-                className="min-h-0 flex-1"
-                role={canEdit ? "tabpanel" : undefined}
-                id={canEdit ? EPISODE_VIEW_PANEL_ID : undefined}
-                aria-labelledby={canEdit ? episodeViewTabId(episodeView) : undefined}
-              >
-                {showEditView ? (
-                  <EditTimelineView
-                    key={`${currentProjectName}::${epNum}`}
-                    projectName={currentProjectName}
-                    episode={epNum}
-                    script={script}
-                    aspect={previewAspect(currentProjectData)}
-                    ttsNarration={currentProjectData?.narration_delivery === "use_tts"}
-                    renderActions={({ timelineId, timelineName, issues, showIssues }) =>
-                      // 读取完成前不知道有没有阻断级 issue，先不给出片入口。
-                      issues === null ? null : (
-                        <RenderButton
-                          projectName={currentProjectName}
-                          timelineId={timelineId}
-                          timelineName={timelineName}
-                          issues={issues}
-                          narrationAvailable={currentProjectData?.narration_delivery === "use_tts"}
-                          onShowIssues={showIssues}
-                        />
-                      )
-                    }
-                    renderEmptyState={({ reload }) => (
-                      <EditTimelineEmptyState
-                        projectName={currentProjectName}
-                        episode={epNum}
-                        onCreated={reload}
-                      />
-                    )}
-                  />
-                ) : demoMode && !script ? (
-                  <DemoEpisodePlaceholder />
-                ) : showSourceReview && episode ? (
-                  <EpisodeSourceReview
-                    projectName={currentProjectName}
-                    episode={epNum}
-                    episodes={currentProjectData?.episodes ?? []}
-                  />
-                ) : route === "reference_video" ? (
+            <EpisodePage
+              projectName={currentProjectName}
+              episode={epNum}
+              projectData={currentProjectData}
+              script={script}
+              demo={demoMode}
+              onSaveTitle={(title) => handleUpdateEpisodeTitle(epNum, title)}
+              onViewUnit={handleViewWorkflowUnit}
+              // 参考生视频的视频入队由 ReferenceVideoCanvas 自己的整批准入判定路径承担，
+              // 本组件的逐单元回调对 video_units 剧本解不出提示词、按下去毫无反应。
+              // 该生成模式只给「查看」跳转，重生入口在跳过去的那张单元卡上。
+              onRegenerate={
+                route === "reference_video" || !scriptFile
+                  ? undefined
+                  : (stepId, unitIds) => void handleWorkflowRegenerate(stepId, unitIds, scriptFile)
+              }
+              renderCanvas={({ view, onViewChange }) =>
+                route === "reference_video" ? (
                   <ReferenceVideoCanvas
                     // 同一 epNum 跨项目不 remount 会让 optimisticUnitIds / prevTaskStatusRef
                     // 残留上个项目的状态（例如 "E1U1" 长驻 set 里），切到同名 unit 的新项目
@@ -839,9 +529,8 @@ export function StudioCanvasRouter() {
                     key={`${currentProjectName}::${epNum}`}
                     projectName={currentProjectName}
                     episode={epNum}
-                    episodeTitle={episode?.title}
-                    onSaveTitle={(title) => handleUpdateEpisodeTitle(epNum, title)}
-                    canEditTitle={Boolean(episode?.script_file)}
+                    view={view}
+                    onViewChange={onViewChange}
                     hasScript={Boolean(script)}
                     showPreprocess={!isAd}
                     freeDuration={isAd}
@@ -853,9 +542,8 @@ export function StudioCanvasRouter() {
                     key={`${currentProjectName}::${epNum}`}
                     projectName={currentProjectName}
                     episode={epNum}
-                    episodeTitle={episode?.title}
-                    onSaveTitle={(title) => handleUpdateEpisodeTitle(epNum, title)}
-                    canEditTitle={Boolean(episode?.script_file)}
+                    view={view}
+                    onViewChange={onViewChange}
                     hasDraft={hasDraft}
                     episodeScript={script}
                     scriptFile={scriptFile ?? undefined}
@@ -867,7 +555,7 @@ export function StudioCanvasRouter() {
                     videoModelUnresolved={capabilities.videoModelUnresolved}
                     lastFrame={capabilities.lastFrame}
                     capabilitiesLoading={capabilities.loading}
-                    onUpdatePrompt={awaitedUpdatePrompt}
+                    onUpdatePrompt={handleUpdatePrompt}
                     onGenerateStoryboard={voidPromise(handleGenerateStoryboard)}
                     onGenerateVideo={handleGenerateVideo}
                     onGenerateNarration={narrationGenerationEnabled ? voidPromise(handleGenerateNarration) : undefined}
@@ -887,10 +575,8 @@ export function StudioCanvasRouter() {
                     key={`${currentProjectName}::${epNum}`}
                     projectName={currentProjectName}
                     episode={epNum}
-                    episodeTitle={episode?.title}
-                    // 演示态的只读由 TimelineCanvas 直读判定收口，这里只表达非演示态的固有约束
-                    onSaveTitle={(title) => handleUpdateEpisodeTitle(epNum, title)}
-                    canEditTitle={Boolean(episode?.script_file)}
+                    view={view}
+                    onViewChange={onViewChange}
                     hasDraft={hasDraft}
                     episodeScript={script}
                     scriptFile={scriptFile ?? undefined}
@@ -902,7 +588,7 @@ export function StudioCanvasRouter() {
                     videoModelUnresolved={capabilities.videoModelUnresolved}
                     lastFrame={capabilities.lastFrame}
                     capabilitiesLoading={capabilities.loading}
-                    onUpdatePrompt={awaitedUpdatePrompt}
+                    onUpdatePrompt={handleUpdatePrompt}
                     onMoveShot={handleMoveShot}
                     onInsertShot={handleInsertShot}
                     onRemoveShot={handleRemoveShot}
@@ -913,11 +599,16 @@ export function StudioCanvasRouter() {
                     onRestoreStoryboard={handleRestoreAsset}
                     onRestoreVideo={handleRestoreAsset}
                   />
-                )}
-              </div>
-            </div>
+                )
+              }
+            />
           );
         }}
+      </Route>
+
+      {/* 没有路由承接的子路径（含已移除的 lorebook、clues）：画布内显示空状态，外壳保留 */}
+      <Route>
+        <WorkspaceNotFound />
       </Route>
     </Switch>
   );

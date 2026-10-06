@@ -1,7 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import userEvent from "@testing-library/user-event";
+import { createDeferred } from "@/test/deferred";
 import { API } from "@/api";
 import { VersionTimeMachine } from "./VersionTimeMachine";
+import { useProjectsStore } from "@/stores/projects-store";
 import { useAppStore } from "@/stores/app-store";
 
 describe("VersionTimeMachine", () => {
@@ -95,8 +98,44 @@ describe("VersionTimeMachine", () => {
       );
       expect(onRestore).toHaveBeenCalledWith(1);
       expect(API.getVersions).toHaveBeenCalledTimes(2);
-      expect(useAppStore.getState().toast?.text).toBe("已切换到 v1");
     });
+    // 切换结果体现在「当前」标记上，成功不弹提示
+    expect(await screen.findByText("当前 v1")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /切换到此版本/ })).not.toBeInTheDocument();
+    expect(useAppStore.getState().toast).toBeNull();
+  });
+
+  it("reloads product history when the product image fingerprint changes", async () => {
+    useProjectsStore.setState({ assetFingerprints: { "products/Cup.png": 1 } });
+    vi.spyOn(API, "getVersions")
+      .mockResolvedValueOnce({ resource_type: "products", resource_id: "Cup", current_version: 1, versions: [] })
+      .mockResolvedValueOnce({ resource_type: "products", resource_id: "Cup", current_version: 2, versions: [] });
+    render(<VersionTimeMachine projectName="demo" resourceType="products" resourceId="Cup" open />);
+    expect(await screen.findByText("当前 v1")).toBeInTheDocument();
+
+    act(() => useProjectsStore.getState().updateAssetFingerprints({ "products/Cup.png": 2 }));
+
+    expect(await screen.findByText("当前 v2")).toBeInTheDocument();
+    useProjectsStore.setState({ assetFingerprints: {} });
+  });
+
+  it("ignores Escape while a version restore is in flight", async () => {
+    const user = userEvent.setup();
+    const pending = createDeferred<{ success: boolean }>();
+    vi.spyOn(API, "getVersions").mockResolvedValue({
+      resource_type: "products", resource_id: "Cup", current_version: 2,
+      versions: [{ version: 1, filename: "v1.png", created_at: "2026-10-01", file_size: 1, is_current: false }],
+    });
+    vi.spyOn(API, "restoreVersion").mockReturnValue(pending.promise);
+    render(<VersionTimeMachine projectName="demo" resourceType="products" resourceId="Cup" />);
+    await user.click(screen.getByRole("button", { name: /版本/ }));
+    await user.click(await screen.findByRole("button", { name: "v1" }));
+    await user.click(screen.getByRole("button", { name: "切换到此版本" }));
+    await user.keyboard("{Escape}");
+    expect(screen.getByText("历史版本")).toBeInTheDocument();
+    await act(() => pending.resolve({ success: true }));
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByText("历史版本")).not.toBeInTheDocument());
   });
 
   it("shows character preview with contain layout so tall images are not cropped", async () => {
@@ -398,7 +437,7 @@ describe("VersionTimeMachine", () => {
 
     const restoreButton = await screen.findByRole("button", { name: /切换到此版本/ });
     expect(restoreButton).toBeDisabled();
-    expect(restoreButton).toHaveAttribute("title", "生成或编辑进行中，暂无法切换版本");
+    expect(restoreButton).toHaveAccessibleDescription("生成或编辑进行中，暂无法切换版本");
 
     fireEvent.click(restoreButton);
     expect(restoreSpy).not.toHaveBeenCalled();

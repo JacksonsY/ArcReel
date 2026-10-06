@@ -1,46 +1,36 @@
 import { useTranslation } from "react-i18next";
+import { WorkDetail, WorkRow, useSessionDone } from "./WorkRow";
+import { SKILL_ICON } from "./work-label";
 
 // ---------------------------------------------------------------------------
-// SkillChip – inline `/skill-name` chip for skill invocations.
-//
-// 工序行视觉语言：机器工序收敛为低对比单行。skill 调用只显示名与入参
-// （写入点定型，注入全文不在日志中），不可展开。
+// SkillChip – Skill 调用的工序行：「/skill-name」加入参。展开查看日志中已有的参数与
+// 结果；注入的 skill 全文不在日志里，没有参数与结果时不可展开。
 // ---------------------------------------------------------------------------
-
-export type SkillChipStatus = "running" | "ok" | "error";
 
 interface SkillChipProps {
   name?: string;
   args?: string;
-  status?: SkillChipStatus;
+  /** Skill tool_use 还没有结果；独立的 skill_invocation 记录视为已完成。 */
+  pending?: boolean;
+  failed?: boolean;
+  result?: string;
 }
 
-export function SkillChip({ name, args, status }: SkillChipProps) {
+export function SkillChip({ name, args, pending = false, failed = false, result }: SkillChipProps) {
   const { t } = useTranslation("dashboard");
-  const displayName = name || t("skill_chip_unknown");
-
-  const statusIcon = status === "ok" ? "✓" : status === "error" ? "✗" : status === "running" ? "…" : null;
-  const statusColor =
-    status === "ok" ? "var(--color-good)" : status === "error" ? "var(--color-danger)" : "var(--color-text-4)";
+  const sessionDone = useSessionDone();
+  const status = failed ? "error" : !pending ? "ok" : sessionDone ? "stopped" : "running";
+  const input = args?.trim() ? args : "";
+  const output = result?.trim() ? result : "";
 
   return (
-    <div className="my-1 flex min-w-0 items-center gap-1.5">
-      <span
-        className="num inline-flex shrink-0 items-center rounded-md px-1.5 py-0.5 text-[11px] font-medium"
-        style={{ background: "var(--color-accent-dim)", color: "var(--color-accent-2)" }}
-      >
-        /{displayName}
-      </span>
-      {args && (
-        <span className="truncate text-[11px]" style={{ color: "var(--color-text-3)" }} title={args}>
-          {args}
-        </span>
+    <WorkRow icon={SKILL_ICON} name={`/${name || t("skill_chip_unknown")}`} summary={args} status={status}>
+      {(input || output) && (
+        <>
+          {input && <WorkDetail label={t("tool_call_input_label")} text={input} />}
+          {output && <WorkDetail label={t("tool_call_result_label")} text={output} error={status === "error"} />}
+        </>
       )}
-      {statusIcon && (
-        <span className="shrink-0 text-[11px] font-medium" style={{ color: statusColor }}>
-          {statusIcon}
-        </span>
-      )}
-    </div>
+    </WorkRow>
   );
 }
