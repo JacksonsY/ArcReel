@@ -1,6 +1,6 @@
 name: Docker GHCR
 
-# main 合入后发布 latest、main 与不可变 sha-* 标签，均指向同一镜像。
+# main 合入后发布 latest 与不可变 sha-* 标签，均指向同一镜像。
 
 on:
   push:
@@ -85,7 +85,6 @@ jobs:
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}:latest
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}:main
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}:sha-${{ steps.image.outputs.sha_short }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
