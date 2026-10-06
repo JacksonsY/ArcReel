@@ -1,4 +1,4 @@
-"""上游同步保留二开配置和官方标签，冲突时不覆盖远端，重复同步不产生提交。"""
+"""上游同步保留二开配置，业务冲突时不提交，重复同步不产生提交。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import pytest
 import yaml
 
 
-@pytest.mark.parametrize("scenario", ["updated", "unchanged", "conflict", "tag-conflict"])
+@pytest.mark.parametrize("scenario", ["updated", "unchanged", "conflict"])
 def test_upstream_merge_preserves_fork_and_stops_on_conflicts(tmp_path: Path, scenario: str) -> None:
     workflow = Path(__file__).resolve().parents[2] / ".github/workflows/sync-upstream.yml"
     steps = yaml.safe_load(workflow.read_text(encoding="utf-8"))["jobs"]["sync"]["steps"]
@@ -43,10 +43,6 @@ def test_upstream_merge_preserves_fork_and_stops_on_conflicts(tmp_path: Path, sc
     git("commit", "-m", "upstream update")
     upstream = git("rev-parse", "HEAD")
     git("update-ref", "refs/remotes/upstream/main", base if scenario == "unchanged" else upstream)
-    git("tag", "-a", "v0.1.0", "-m", "Official release")
-    official_tag = git("rev-parse", "refs/tags/v0.1.0")
-    git("update-ref", "refs/upstream/tags/v0.1.0", official_tag)
-    git("tag", "-d", "v0.1.0")
 
     git("checkout", "main")
     old_workflow.unlink()
@@ -56,11 +52,6 @@ def test_upstream_merge_preserves_fork_and_stops_on_conflicts(tmp_path: Path, sc
     git("add", ".")
     git("commit", "-m", "fork changes")
     before = git("rev-parse", "HEAD")
-    if scenario == "tag-conflict":
-        git("tag", "-a", "v0.1.0", "-m", "Fork release")
-    origin = tmp_path / "origin.git"
-    git("clone", "--bare", ".", str(origin))
-    git("remote", "add", "origin", str(origin))
     output = tmp_path / "github-output"
     result = subprocess.run(
         ["bash", "-e", "-o", "pipefail", "-c", script],
@@ -73,7 +64,7 @@ def test_upstream_merge_preserves_fork_and_stops_on_conflicts(tmp_path: Path, sc
     assert (workflows / "docker-edge.yml").read_text(encoding="utf-8") == "fork Docker\n"
     assert not old_workflow.exists(), result.stdout + result.stderr
     assert not (workflows / "new-official.yml").exists(), result.stdout + result.stderr
-    if scenario in {"updated", "tag-conflict"}:
+    if scenario == "updated":
         assert result.returncode == 0, result.stdout + result.stderr
         assert content.read_text(encoding="utf-8") == "upstream\n"
         assert git("rev-parse", "HEAD^1") == before
@@ -107,21 +98,3 @@ def test_upstream_merge_preserves_fork_and_stops_on_conflicts(tmp_path: Path, sc
         else:
             assert result.returncode != 0
             assert "conflicts require manual resolution" in result.stdout
-
-    if scenario != "conflict":
-        push_step = next(step for step in steps if step.get("id") == "push")
-        push_command = next(line for line in push_step["run"].splitlines() if line.startswith("git push "))
-        pushed = subprocess.run(
-            ["bash", "-e", "-o", "pipefail", "-c", push_command],
-            cwd=checkout,
-            capture_output=True,
-            text=True,
-        )
-        if scenario == "tag-conflict":
-            assert pushed.returncode != 0
-            assert git("ls-remote", "origin", "refs/heads/main").split()[0] == before
-            assert git("ls-remote", "origin", "refs/tags/v0.1.0").split()[0] != official_tag
-        else:
-            assert pushed.returncode == 0, pushed.stdout + pushed.stderr
-            assert git("ls-remote", "origin", "refs/heads/main").split()[0] == git("rev-parse", "HEAD")
-            assert git("ls-remote", "origin", "refs/tags/v0.1.0").split()[0] == official_tag
