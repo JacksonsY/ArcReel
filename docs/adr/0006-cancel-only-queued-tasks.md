@@ -1,8 +1,10 @@
 ---
-status: accepted
+status: superseded
 ---
 
 # 取消只对排队中的任务开放，执行中的任务总是跑到终态
+
+本决策已由 [0098：允许终止运行中的生成任务](0098-cancel-running-generation-tasks.md) 替代。以下保留原决策背景。
 
 生成任务的取消只对 `queued` 开放。任务一旦被 worker 认领进入 `running`，就不可取消：已发出的供应商调用照常跑完，结果照常成为产物。对执行中的任务发起取消一律被拒绝，任务状态不变。这与术语表（`CONTEXT.md`「取消」）的定义一致。
 

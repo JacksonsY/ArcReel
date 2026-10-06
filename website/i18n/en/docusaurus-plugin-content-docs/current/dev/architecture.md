@@ -234,7 +234,7 @@ Key capabilities include:
 - persistent state;
 - recovery after interruption;
 - failure records;
-- cancellation of queued tasks;
+- cancellation of queued and running tasks (local execution stops; provider refunds are not guaranteed);
 - project event notifications and task status refreshes.
 
 ### 8.1 Why Tasks Must Be Persistent {#why-persistent-tasks}

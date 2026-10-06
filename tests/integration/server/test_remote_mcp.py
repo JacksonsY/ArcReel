@@ -32,7 +32,7 @@ from server.agent_toolset.toolset import ARCREEL_MCP_TOOL_IDS
 from server.auth import create_download_token, create_token
 from server.cors_config import resolve_cors_policy
 from server.remote_mcp import ArcApiKeyVerifier, RemoteMCPHost, build_remote_mcp_server
-from server.tool_runtime import Services, TextGenerationResult
+from server.tool_runtime import Services
 from tests.factories import install_current_video, make_test_clip, make_video_request_facts, register_project_sources
 from tests.fakes import refuse_resume_execution
 from tests.integration.server.agent_tool_support import ToolHarness
@@ -363,7 +363,7 @@ async def test_remote_mcp_returns_typed_workflow_plan_and_rejects_bad_project(
         "confirm_script_review",
         "patch_episode_script",
     }
-    batches = {"get_generation_batch", "cancel_generation_batch"}
+    batches = {"get_generation_batch", "cancel_generation_batch", "cancel_generation_task", "list_generation_tasks"}
     retired = {
         "convert_script_plan",
         "normalize_drama_script",
@@ -844,7 +844,7 @@ async def test_remote_mcp_text_generation_and_script_patch_return_structured_con
     assert patched.structuredContent["script_patch"]["problems"][0]["code"] == "revision_conflict"
 
 
-async def test_text_task_is_shared_by_remote_and_embedded_hosts_and_running_member_is_not_cancellable(
+async def test_text_task_is_shared_by_remote_and_embedded_hosts_and_running_member_can_be_cancelled(
     tmp_path: Path, file_db_factory
 ) -> None:
     class RecordingQueue(GenerationQueue):
@@ -950,8 +950,8 @@ async def test_text_task_is_shared_by_remote_and_embedded_hosts_and_running_memb
                 "cancel_generation_batch", {"project": "demo", "batch_id": remote_batch["batch_id"]}
             )
             task_id = remote_batch["members"][0]["task_id"]
-            still_running = await queue.get_task(task_id)
-            release.set()
+            stopped_task = await queue.get_task(task_id)
+            await asyncio.wait_for(interrupted.wait(), timeout=5)
             embedded_result = await embedded
             terminal = await session.call_tool(
                 "get_generation_batch", {"project": "demo", "batch_id": remote_batch["batch_id"]}
@@ -959,17 +959,17 @@ async def test_text_task_is_shared_by_remote_and_embedded_hosts_and_running_memb
 
         assert not cancel_result.isError
         assert cancel_result.structuredContent["generation_batch_cancellation"] == {
-            "cancelled": [],
-            "skipped_running": [task_id],
+            "cancelled": [task_id],
+            "skipped_running": [],
             "skipped_terminal": [],
         }
-        assert still_running is not None
-        assert still_running["status"] == "running"
-        assert not interrupted.is_set()
-        assert isinstance(embedded_result.value, TextGenerationResult)
-        assert embedded_result.value.message == "done"
+        assert stopped_task is not None
+        assert stopped_task["status"] == "cancelled"
+        assert interrupted.is_set()
+        assert embedded_result.problem is not None
+        assert embedded_result.problem.code == "generation_task_cancelled"
         assert terminal.structuredContent["generation_batch"]["done"] is True
-        assert terminal.structuredContent["generation_batch"]["members"][0]["status"] == "succeeded"
+        assert terminal.structuredContent["generation_batch"]["members"][0]["status"] == "cancelled"
         second = await queue.get_generation_batch(project_name="demo", batch_id=queue.batch_ids[1])
         assert second.members[0].task_id == task_id
         assert second.members[0].deduped is True

@@ -182,11 +182,11 @@ class TestCancelTask:
 
 
 # ---------------------------------------------------------------------------
-# Tests: running task is not cancellable (real queue)
+# Tests: running task cancellation (real queue)
 # ---------------------------------------------------------------------------
 
 
-class TestRunningTaskNotCancellable:
+class TestRunningTaskCancellation:
     @pytest.fixture
     async def running_task(self, db_factory, monkeypatch) -> tuple[GenerationQueue, str]:
         queue = GenerationQueue(session_factory=db_factory)
@@ -209,21 +209,18 @@ class TestRunningTaskNotCancellable:
         ("method", "path"),
         [("POST", "/api/v1/tasks/{id}/cancel"), ("GET", "/api/v1/tasks/{id}/cancel-preview")],
     )
-    async def test_running_task_returns_409_in_request_locale_and_keeps_running(
-        self, running_task, locale, method, path
-    ):
+    async def test_running_task_can_be_previewed_and_cancelled_in_each_locale(self, running_task, locale, method, path):
         queue, task_id = running_task
         transport = httpx.ASGITransport(app=_make_app())
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             resp = await client.request(method, path.format(id=task_id), headers={"Accept-Language": locale})
 
-        assert resp.status_code == 409
-        assert resp.json()["detail"] == MESSAGES[locale]["task_running_not_cancellable"].format(id=task_id)
+        assert resp.status_code == 200
         row = await queue.get_task(task_id)
         assert row is not None
-        assert row["status"] == "running"
+        assert row["status"] == ("cancelled" if method == "POST" else "running")
 
-    async def test_queued_dependent_of_running_task_is_left_queued(self, running_task):
+    async def test_cancel_running_task_cancels_queued_dependent(self, running_task):
         queue, task_id = running_task
         child = await queue.enqueue_task(
             project_name="demo",
@@ -238,10 +235,10 @@ class TestRunningTaskNotCancellable:
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             resp = await client.post(f"/api/v1/tasks/{task_id}/cancel")
 
-        assert resp.status_code == 409
+        assert resp.status_code == 200
         child_row = await queue.get_task(child["task_id"])
         assert child_row is not None
-        assert child_row["status"] == "queued"
+        assert child_row["status"] == "cancelled"
 
 
 # ---------------------------------------------------------------------------

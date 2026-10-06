@@ -39,7 +39,7 @@ function activeTask(overrides: Partial<TaskItem> = {}): TaskItem {
   });
 }
 
-const RUNNING_REJECTION = "任务 't-q' 已开始执行，不可取消；它会照常跑完并保留结果";
+const CANCEL_REJECTION = "取消请求冲突，请重试";
 
 function mockSinglePreview() {
   vi.spyOn(API, "cancelPreview").mockResolvedValue({
@@ -207,11 +207,20 @@ describe("UsagePopover cancellation", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("offers no cancel action on a task that has started running", () => {
+  it("allows cancelling a running task and explains provider charges", async () => {
+    vi.spyOn(API, "cancelPreview").mockResolvedValue({
+      task: { task_id: "t-run", task_type: "storyboard", resource_id: "E1S10", status: "running" },
+      cascaded: [],
+    });
+    const cancelSpy = vi.spyOn(API, "cancelTask").mockResolvedValue({ cancelled: [], skipped_terminal: [] });
     openWithTasks([activeTask({ task_id: "t-run", status: "running" })]);
 
     expect(screen.getByText("生成中...")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "取消此任务" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "取消此任务" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "取消确认" });
+    expect(dialog).toHaveTextContent("供应商可能继续生成并收费");
+    fireEvent.click(screen.getByRole("button", { name: "确认取消" }));
+    await waitFor(() => expect(cancelSpy).toHaveBeenCalledWith("t-run"));
   });
 
   it("swaps the row action for a disabled spinner while the confirmed cancel is in flight", async () => {
@@ -233,10 +242,10 @@ describe("UsagePopover cancellation", () => {
     expect(screen.queryByRole("button", { name: "正在取消…" })).not.toBeInTheDocument();
   });
 
-  it("shows the server's reason when the task started running before the cancel landed", async () => {
+  it("shows the server's reason for a conflicting cancellation request", async () => {
     mockSinglePreview();
     vi.spyOn(API, "cancelTask").mockRejectedValue(
-      new ApiRequestError(RUNNING_REJECTION, undefined, 409),
+      new ApiRequestError(CANCEL_REJECTION, undefined, 409),
     );
     openWithTasks([activeTask()]);
 
@@ -245,7 +254,7 @@ describe("UsagePopover cancellation", () => {
     fireEvent.click(screen.getByRole("button", { name: "确认取消" }));
 
     const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent(RUNNING_REJECTION);
+    expect(alert).toHaveTextContent(CANCEL_REJECTION);
     expect(alert).not.toHaveTextContent("取消失败，请重试");
     expect(dialog).toBeInTheDocument();
   });

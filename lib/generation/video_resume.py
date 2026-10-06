@@ -46,7 +46,9 @@ async def cleanup_video_staging(task: dict[str, Any]) -> None:
     if task.get("task_type") not in ("video", "reference_video"):
         return
     try:
-        project_path = await asyncio.to_thread(get_project_manager().get_project_path, task["project_name"])
+        project_path = await asyncio.to_thread(
+            get_project_manager().get_project_path, task["project_name"], allow_cancelled=True
+        )
     except Exception:
         logger.warning("video staging project lookup failed task_id=%s", task.get("task_id"), exc_info=True)
         return
@@ -121,7 +123,18 @@ class VideoResumeRunner:
             await asyncio.shield(self.settle_unresumable_call(task, failure="project deleted before resume"))
             return
         with claim_task_project(task["task_id"], project_name) as claim:
-            await self._run_claimed(task, claim)
+            try:
+                current = await self._queue.get_task(task["task_id"])
+                if current is not None and current["status"] == "cancelled":
+                    await asyncio.shield(self.settle_unresumable_call(task, cancelled=True))
+                    await cleanup_video_staging(task)
+                    return
+                await self._run_claimed(task, claim)
+            except asyncio.CancelledError:
+                await asyncio.shield(self._queue.mark_task_interrupted(task["task_id"]))
+                await asyncio.shield(self.settle_unresumable_call(task, cancelled=True))
+                await asyncio.shield(cleanup_video_staging(task))
+                raise
 
     async def _run_claimed(self, task: dict[str, Any], claim: TaskProjectClaim) -> None:
         task_id = task["task_id"]
@@ -186,11 +199,6 @@ class VideoResumeRunner:
         # 下面每一条出口都变得可达。resume 结算带 WHERE status='pending'，重复调用无副作用。
         try:
             result = await _execute_with_video_cleanup()
-        except asyncio.CancelledError:
-            # 进程级打断：落终态并把 pending 调用行结算为 cancelled。
-            await asyncio.shield(self._queue.mark_task_interrupted(task_id))
-            await asyncio.shield(self.settle_unresumable_call(task, cancelled=True))
-            raise
         except NotImplementedError as exc:
             logger.warning("resume 不支持 task %s: %s", task_id, exc)
             await asyncio.shield(
@@ -224,11 +232,7 @@ class VideoResumeRunner:
         if claim.revoked:
             await fail_task_of_deleted_project(self._queue, task)
             return
-        try:
-            await asyncio.shield(self._queue.mark_task_succeeded(task_id, result))
-        except asyncio.CancelledError:
-            await asyncio.shield(self._queue.mark_task_interrupted(task_id))
-            raise
+        await asyncio.shield(self._queue.mark_task_succeeded(task_id, result))
         logger.info("重启自愈完成 %s", task_id)
 
     def _ledger(self) -> Ledger:

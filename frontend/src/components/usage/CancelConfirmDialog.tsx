@@ -43,6 +43,9 @@ export function CancelConfirmDialog({
             ? t("cancel_cascade_msg", { count: cascaded.length })
             : t("cancel_single_confirm")}
       </p>
+      {request.kind === "single" && (
+        <p className="text-xs text-muted-foreground">{t("cancel_running_warning")}</p>
+      )}
       {cascaded.length > 0 && (
         <ul className="num relative max-h-20 overflow-y-auto text-xs text-muted-foreground">
           {cascaded.map((task) => (

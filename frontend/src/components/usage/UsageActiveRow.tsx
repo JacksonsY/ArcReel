@@ -30,8 +30,7 @@ const TASK_STATUS_KEYS: Record<TaskItem["status"], string> = {
 
 /**
  * 进行中区的一行。左栏同时容纳两种来源：任务 store 里项目内进行中的任务，以及没有
- * 任务代表的 pending 调用（剧本生成、助手会话一类）。只有排队中的任务可取消：
- * 已开始执行的任务照常跑完，pending 调用没有任务可取消。
+ * 任务代表的 pending 调用（剧本生成、助手会话一类）。排队中与执行中的任务均可取消。
  */
 export function UsageActiveRow({
   view,
@@ -46,7 +45,7 @@ export function UsageActiveRow({
   const media = MEDIA_META[view.mediaType];
   const MediaIcon = media.Icon;
   const running = task?.status === "running";
-  const cancellable = task?.status === "queued";
+  const cancellable = task?.status === "queued" || running;
   const statusText = task
     ? (task.error_message ?? t(TASK_STATUS_KEYS[task.status]))
     : t("usage_status_pending");

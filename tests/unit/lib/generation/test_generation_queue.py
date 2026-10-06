@@ -6,7 +6,6 @@ import json
 import pytest
 
 from lib.db.models.task import Task
-from lib.db.repositories.task_repo import TaskNotCancellableError
 from lib.generation.generation_admission import generation_admission_lock
 from lib.generation.generation_queue import (
     GenerationQueue,
@@ -542,7 +541,7 @@ class TestGenerationQueue:
         assert child_row["status"] == "cancelled"
         assert await queue.mark_task_interrupted(parent["task_id"]) == 0
 
-    async def test_cancel_running_task_is_rejected_and_task_runs_to_success(self, queue):
+    async def test_cancel_running_task_cannot_be_overwritten_by_success(self, queue):
         enqueued = await queue.enqueue_task(
             project_name="demo",
             task_type="video",
@@ -553,20 +552,18 @@ class TestGenerationQueue:
         )
         assert await queue.claim_next_task("video") is not None
 
-        with pytest.raises(TaskNotCancellableError) as exc_info:
-            await queue.cancel_task(enqueued["task_id"])
-        assert exc_info.value.task_id == enqueued["task_id"]
-        with pytest.raises(TaskNotCancellableError):
-            await queue.get_cancel_preview(enqueued["task_id"])
+        assert (await queue.get_cancel_preview(enqueued["task_id"]))["task"]["status"] == "running"
+        cancelled = await queue.cancel_task(enqueued["task_id"])
+        assert cancelled["cancelled"][0]["task_id"] == enqueued["task_id"]
 
         still_running = await queue.get_task(enqueued["task_id"])
         assert still_running is not None
-        assert still_running["status"] == "running"
-        assert await queue.mark_task_succeeded(enqueued["task_id"], {"file_path": "videos/r1.mp4"}) == 1
+        assert still_running["status"] == "cancelled"
+        assert await queue.mark_task_succeeded(enqueued["task_id"], {"file_path": "videos/r1.mp4"}) == 0
         done = await queue.get_task(enqueued["task_id"])
         assert done is not None
-        assert done["status"] == "succeeded"
-        assert done["result"] == {"file_path": "videos/r1.mp4"}
+        assert done["status"] == "cancelled"
+        assert done["result"] == {}
 
     async def test_cancel_queued_task_cascades_to_queued_dependents(self, queue):
         parent = await queue.enqueue_task(

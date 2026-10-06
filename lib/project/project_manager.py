@@ -641,14 +641,14 @@ class ProjectManager:
                 totals["failed_projects"] += 1
         return totals
 
-    def get_project_path(self, name: str) -> Path:
+    def get_project_path(self, name: str, *, allow_cancelled: bool = False) -> Path:
         """获取项目路径（含路径遍历防护）。
 
         在执行任务的上下文里，项目已在任务执行期间删除时抛 ``ProjectDeletedDuringTaskError``：
         同名目录此时可能已属于新建或导入的另一个项目。
         """
         name = self.normalize_project_name(name)
-        ensure_task_project_claim(name)
+        ensure_task_project_claim(name, allow_cancelled=allow_cancelled)
         try:
             project_dir = safe_join(self.projects_dir, name)
         except PathTraversalError as exc:

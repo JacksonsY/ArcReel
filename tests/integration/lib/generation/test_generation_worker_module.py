@@ -31,6 +31,59 @@ async def _fixed_projection(_task) -> str:
     return "test"
 
 
+async def test_user_cancellation_stops_the_active_executor_and_preserves_reason(worker_db):
+    await seed_running_task(worker_db, "user-cancel", task_type="storyboard", media_type="image")
+    queue = db_queue(worker_db)
+    started = asyncio.Event()
+    stopped = asyncio.Event()
+
+    async def execute(_task, *, claimed_provider_id):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stopped.set()
+        return {"result": "must not succeed"}
+
+    worker = GenerationWorker(
+        queue=queue,
+        provider_projection=_fixed_projection,
+        executor=execute,
+        resume_executor=stub_executors.execute_resume,
+    )
+    active = asyncio.create_task(worker._process_task({"task_id": "user-cancel", "media_type": "image"}))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        await queue.cancel_task("user-cancel")
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(active, timeout=5)
+        assert stopped.is_set()
+        row = await queue.get_task("user-cancel")
+        assert row is not None
+        assert row["status"] == "cancelled"
+        assert row["cancelled_by"] == "user"
+        assert row["result"] == {}
+    finally:
+        if not active.done():
+            active.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await active
+
+
+async def test_cancel_between_claim_and_execution_never_calls_executor(worker_db):
+    await seed_running_task(worker_db, "cancel-before-dispatch", task_type="storyboard", media_type="image")
+    queue = db_queue(worker_db)
+    await queue.cancel_task("cancel-before-dispatch")
+    worker = GenerationWorker(
+        queue=queue,
+        provider_projection=_fixed_projection,
+        executor=stub_executors.execute,
+        resume_executor=stub_executors.execute_resume,
+    )
+    await worker._process_task({"task_id": "cancel-before-dispatch", "media_type": "image"})
+    assert (await queue.get_task("cancel-before-dispatch"))["cancelled_by"] == "user"
+
+
 class TestReadIntEnv:
     def test_default_when_unset(self, monkeypatch):
         monkeypatch.delenv("ARCREEL_INT", raising=False)

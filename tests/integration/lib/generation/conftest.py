@@ -26,7 +26,7 @@ def staged_project(tmp_path, monkeypatch) -> Path:
     project_path.mkdir()
 
     class _PM:
-        def get_project_path(self, _name: str) -> Path:
+        def get_project_path(self, _name: str, *, allow_cancelled: bool = False) -> Path:
             return project_path
 
     monkeypatch.setattr("lib.generation.video_resume.get_project_manager", lambda: _PM())

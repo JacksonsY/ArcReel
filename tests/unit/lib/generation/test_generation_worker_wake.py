@@ -22,6 +22,9 @@ class _WakeQueue:
     async def list_orphan_tasks_on_start(self) -> list[dict[str, Any]]:
         return []
 
+    async def get_task(self, _task_id: str) -> None:
+        return None
+
     async def claim_next_task(self, media_type: str, **_kwargs: Any) -> dict[str, str] | None:
         assert media_type == "text"
         if self.idle.is_set() and not self.claimed:

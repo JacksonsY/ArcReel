@@ -7,8 +7,7 @@ ConfigService 的用户配置）+ SlotTable（运行时占用台账）。
 受支持的部署只启动一个 uvicorn 进程；server lifespan 在该进程内创建唯一的
 GenerationWorker，二者生命周期一致，孤儿任务只来自进程重启。lease 能在进程短暂重叠时防止
 重复认领，并为跨进程接管提供防御，但不让多 uvicorn worker 成为受支持部署；若支持多进程，
-须重审孤儿判定（见 ``docs/adr/0007``）。取消只对排队中的任务开放，worker 不接收取消信号，
-执行中的任务总是跑到终态（见 ``docs/adr/0006``）。
+须重审孤儿判定（见 ``docs/adr/0007``）。用户取消落库后，经项目认领终止执行协程。
 
 任务执行器与续跑执行器由应用装配处注入；重启自愈与续跑分别在 ``restart_recovery`` 与
 ``video_resume``，由 worker 持有。
@@ -810,10 +809,8 @@ class GenerationWorker:
     async def _process_task(self, task: dict[str, Any], *, claimed_provider_id: str | None = None) -> None:
         """Run a generation task to a terminal state.
 
-        执行中的任务不可取消，执行结果照常落终态。协程只会被进程级原因（事件循环拆除、
-        关停超时等）打断：此时经 ``mark_task_interrupted`` 落 cancelled，避免任务停在
-        running、被每次重启的自愈重新拉起。所有 DB 写入都用 ``asyncio.shield`` 包裹，
-        打断落在 await 期间时让 UPDATE 跑完再向外传播。
+        用户取消与进程级打断都终止协程。后者经 ``mark_task_interrupted`` 落 cancelled；
+        已落库的用户取消不会被兜底覆盖。所有终态 DB 写入都用 ``asyncio.shield`` 包裹。
 
         执行在任务对项目的认领下进行。项目在执行期间被删除时认领作废，执行器在落盘前中止；
         无论执行器以什么结果返回，任务都以 ``project_deleted_during_task`` 失败。
@@ -827,16 +824,20 @@ class GenerationWorker:
     ) -> None:
         task_id = task["task_id"]
         task_type = task.get("task_type", "unknown")
-        provider_id = claimed_provider_id or await self._provider_projection(task)
-        logger.info("开始处理任务 %s (type=%s, provider=%s)", task_id, task_type, provider_id)
-
+        provider_id = claimed_provider_id
         try:
+            # 取消可能发生在 SQL 认领之后、进入执行上下文之前。
+            current = await self.queue.get_task(task_id)
+            if current is not None and current["status"] == "cancelled":
+                return
+            provider_id = provider_id or await self._provider_projection(task)
+            logger.info("开始处理任务 %s (type=%s, provider=%s)", task_id, task_type, provider_id)
             if task_type in ("video", "reference_video"):
                 # 派发时把当下的全局轮询超时写进任务字典，执行器与续跑执行器都从这里读。
                 task["video_poll_timeout_seconds"] = await read_video_poll_timeout_seconds()
             result = await self._executor(task, claimed_provider_id=provider_id)
         except asyncio.CancelledError:
-            # 进程级打断：用户取消不会打到执行中的任务。
+            # 用户取消已是终态，guarded UPDATE 保留 cancelled_by='user'。
             await asyncio.shield(self.queue.mark_task_interrupted(task_id))
             raise
         except DispatchProviderChanged as exc:

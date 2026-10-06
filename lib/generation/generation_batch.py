@@ -129,7 +129,7 @@ class GenerationBatchCancelResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     cancelled: list[str] = Field(default_factory=list)
-    #: 已开始执行、不可取消的成员：照常跑完，结果照常成为产物。
+    #: 旧客户端兼容字段；运行中的成员现可取消，此列表正常为空。
     skipped_running: list[str] = Field(default_factory=list)
     skipped_terminal: list[str] = Field(default_factory=list)
 

@@ -127,7 +127,7 @@ def _task_to_dict(row: Task) -> dict[str, Any]:
 
 
 class TaskNotCancellableError(Exception):
-    """任务已开始执行，不可取消：取消只对 queued 开放，执行中的任务照常跑完。"""
+    """任务状态不支持取消；兼容旧调用方的冲突处理。"""
 
     def __init__(self, task_id: str) -> None:
         super().__init__(f"任务 '{task_id}' 正在执行，不可取消")
@@ -752,18 +752,11 @@ class TaskRepository(BaseRepository):
         return cascaded
 
     async def get_cancel_preview(self, task_id: str) -> dict[str, Any]:
-        """预览取消某个排队中任务的影响范围：列出会被一并取消的排队中下游。
-
-        取消只对 ``queued`` 开放；执行中的任务抛 ``TaskNotCancellableError``。终态任务照常
-        返回摘要，由调用方决定是否继续。
-        """
+        """预览取消任务的影响范围：列出会被一并取消的排队中下游。"""
         result = await self.session.execute(self._scope_query(select(Task).where(Task.task_id == task_id), Task))
         task = result.scalar_one_or_none()
         if not task:
             raise ValueError(f"任务 '{task_id}' 不存在")
-        if task.status == "running":
-            raise TaskNotCancellableError(task_id)
-
         task_summary = {
             "task_id": task.task_id,
             "project_name": task.project_name,
@@ -793,13 +786,12 @@ class TaskRepository(BaseRepository):
         return dependents
 
     async def cancel_task(self, task_id: str) -> dict[str, Any]:
-        """取消一个排队中的任务，并级联取消依赖它的排队中下游。
+        """取消一个排队或执行中的任务，并级联取消依赖它的排队中下游。
 
-        - ``queued`` → ``cancelled('user')``，下游 ``cancelled('cascade')``（含 grandchildren）；
-        - ``running`` → 抛 ``TaskNotCancellableError``，任务照常跑完；
+        - ``queued/running`` → ``cancelled('user')``，下游 ``cancelled('cascade')``（含 grandchildren）；
         - 终态（succeeded/failed/cancelled）→ ``skipped_terminal``。
 
-        读到 queued 后 UPDATE 前被 worker 认领的竞态同样按 running 拒绝。
+        读到 queued 后 UPDATE 前被 worker 认领的竞态同样可取消。
         """
         result = await self.session.execute(self._scope_query(select(Task).where(Task.task_id == task_id), Task))
         task = result.scalar_one_or_none()
@@ -812,7 +804,12 @@ class TaskRepository(BaseRepository):
             skipped_terminal.append(_task_to_dict(task))
             return {"cancelled": cancelled, "skipped_terminal": skipped_terminal}
 
-        if await self._mark_cancelled(task.task_id, cancelled_by="user", cancelled=cancelled) is None:
+        if (
+            await self._mark_cancelled(
+                task.task_id, cancelled_by="user", cancelled=cancelled, from_statuses=("queued", "running")
+            )
+            is None
+        ):
             await self.session.rollback()
             await self.session.refresh(task)
             if task.status in TERMINAL_TASK_STATUSES:
@@ -832,8 +829,7 @@ class TaskRepository(BaseRepository):
     ) -> dict[str, Any] | None:
         """把 ``from_statuses`` 内的任务落 cancelled 终态，再级联取消排队中的下游。
 
-        用户取消只从 ``queued`` 转移；进程级打断经 ``finalize_interrupted`` 额外放行
-        ``running``。下游依赖上游完成才会被认领，上游未完成时下游必然仍在排队，级联只需
+        用户取消与进程级打断放行 ``queued/running``。下游依赖上游完成才会被认领，级联只需
         处理 ``queued``。UPDATE 影响 0 行时返回 None。
         """
         now = utc_now()
@@ -952,8 +948,8 @@ class TaskRepository(BaseRepository):
         """进程级打断的兜底：把被打断的 queued / running 任务落 cancelled，返回受影响行数。
 
         执行协程被进程级原因（事件循环拆除、关停超时等）打断时由 worker 调用，让任务不停在
-        ``running``、不在每次重启时被重启自愈重新拉起。这不是用户取消：用户取消只对 queued
-        开放，见 ``cancel_task``。本 task 落终态后级联取消排队中的下游。
+        ``running``、不在每次重启时被重启自愈重新拉起。这不是用户取消，已有的用户取消
+        保持原来源。本 task 落终态后级联取消排队中的下游。
         """
         data = await self._mark_cancelled(
             task_id,
@@ -1081,6 +1077,7 @@ class TaskRepository(BaseRepository):
         status: str | None = None,
         task_type: str | None = None,
         source: str | None = None,
+        user_id: str | None = None,
         page: int = 1,
         page_size: int = 50,
     ) -> dict[str, Any]:
@@ -1089,6 +1086,8 @@ class TaskRepository(BaseRepository):
         offset = (page - 1) * page_size
 
         filters = []
+        if user_id is not None:
+            filters.append(Task.user_id == user_id)
         if project_name:
             filters.append(Task.project_name == project_name)
         if status:

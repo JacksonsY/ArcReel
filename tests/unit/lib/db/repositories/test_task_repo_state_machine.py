@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from lib.db.repositories.task_repo import TaskNotCancellableError, TaskRepository
+from lib.db.repositories.task_repo import TaskRepository
 
 
 @pytest.mark.asyncio
@@ -86,7 +86,7 @@ class TestRepoStateMachineGuards:
         assert await repo.finalize_interrupted(t["task_id"]) == 0
         assert (await repo.get(t["task_id"]))["status"] == "succeeded"
 
-    async def test_cancel_task_rejects_running_and_leaves_it_running(self, db_session):
+    async def test_cancel_task_transitions_running_to_cancelled(self, db_session):
         repo = TaskRepository(db_session)
         t = await repo.enqueue(
             project_name="demo",
@@ -97,14 +97,12 @@ class TestRepoStateMachineGuards:
             script_file="ep1.json",
         )
         await repo.claim_next("image")
-        with pytest.raises(TaskNotCancellableError) as exc_info:
-            await repo.cancel_task(t["task_id"])
-        assert exc_info.value.task_id == t["task_id"]
-        assert (await repo.get(t["task_id"]))["status"] == "running"
+        result = await repo.cancel_task(t["task_id"])
+        assert result["cancelled"][0]["task_id"] == t["task_id"]
+        assert (await repo.get(t["task_id"]))["status"] == "cancelled"
 
-        # 被拒绝的取消不改变执行：任务照常收尾为 succeeded
-        assert await repo.mark_succeeded(t["task_id"], {"x": 1}) == 1
-        assert (await repo.get(t["task_id"]))["status"] == "succeeded"
+        assert await repo.mark_succeeded(t["task_id"], {"x": 1}) == 0
+        assert (await repo.get(t["task_id"]))["status"] == "cancelled"
 
     async def test_cancel_task_terminal_is_skipped(self, db_session):
         repo = TaskRepository(db_session)

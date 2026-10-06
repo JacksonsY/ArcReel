@@ -29,7 +29,7 @@ export interface TaskCancellation {
   cancelling: boolean;
   /** 上一次确认的取消请求失败；确认态保留，用户可重试。 */
   failed: boolean;
-  /** 服务端拒绝取消时给出的已本地化原因（如任务已开始执行）；网络类失败为 null。 */
+  /** 服务端拒绝取消时给出的已本地化原因；网络类失败为 null。 */
   failureDetail: string | null;
   /** 取消请求在途的任务 id；行内把 × 换成 spinner 用它判定。 */
   cancellingTaskIds: ReadonlySet<string>;
@@ -40,12 +40,8 @@ export interface TaskCancellation {
 }
 
 /**
- * 取消任务的两步交互：先取预览、再由 `alertdialog` 二次确认。取消只对排队中的任务开放
- * （ADR 0006）——单个取消预览会被级联取消的排队中下游，全部取消只清排队中、不动执行中。
- *
- * 预览接口在任务已离开可取消状态时报错，此时静默收场：这一行马上会被下一轮任务刷新
- * 改写，弹一个「取消失败」反而让用户以为自己漏点了。确认时任务恰好已开始执行，服务端
- * 以 409 拒绝，确认态展示服务端给出的原因。
+ * 先取级联预览、再由 `alertdialog` 确认。单个取消支持运行中的任务，
+ * 全部取消只清排队中。运行中取消说明供应商可能继续收费。
  */
 export function useTaskCancellation(
   scopeKey: string | null,

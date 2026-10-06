@@ -658,7 +658,7 @@ async def test_queued_plan_failure_carries_the_way_out(
         assert problem.detail == str(failure)
 
 
-async def test_cancel_during_started_episode_script_commit_leaves_member_running_to_success(
+async def test_cancel_during_started_episode_script_commit_keeps_completed_artifact(
     tmp_path: Path, file_db_factory, monkeypatch
 ) -> None:
     projects = ProjectManager(tmp_path / "projects")
@@ -728,22 +728,22 @@ async def test_cancel_during_started_episode_script_commit_leaves_member_running
         assert task_id is not None
         assert await asyncio.to_thread(started.wait, 1)
         cancelled = await queue.cancel_generation_batch(project_name="script", batch_id=batch_id)
-        assert cancelled.model_dump() == {"cancelled": [], "skipped_running": [task_id], "skipped_terminal": []}
+        assert cancelled.model_dump() == {"cancelled": [task_id], "skipped_running": [], "skipped_terminal": []}
     finally:
         release.set()
     try:
         task = await wait_for_task(task_id, 0.01, queue=queue)
-        assert task["status"] == "succeeded"
+        assert task["status"] == "cancelled"
     finally:
         await worker.stop()
     batch = await queue.get_generation_batch(project_name="script", batch_id=batch_id)
     assert batch.done is True
-    assert batch.members[0].status == "succeeded"
+    assert batch.members[0].status == "cancelled"
     assert projects.load_script("script", "episode_1.json")["title"] == "新剧本"
     assert ProjectArtifactManifestAdapter(project_path).get_entry(ArtifactKey.episode_script(1)) is not None
 
 
-async def test_cancel_during_started_episode_plan_commit_leaves_member_running_to_success(
+async def test_cancel_during_started_episode_plan_commit_preserves_consistent_project(
     tmp_path: Path,
     file_db_factory,
     monkeypatch,
@@ -808,18 +808,18 @@ async def test_cancel_during_started_episode_plan_commit_leaves_member_running_t
         assert task_id is not None
         assert await asyncio.to_thread(started.wait, 1)
         cancelled = await queue.cancel_generation_batch(project_name="planning", batch_id=batch_id)
-        assert cancelled.model_dump() == {"cancelled": [], "skipped_running": [task_id], "skipped_terminal": []}
+        assert cancelled.model_dump() == {"cancelled": [task_id], "skipped_running": [], "skipped_terminal": []}
     finally:
         release.set()
     try:
         task = await wait_for_task(task_id, 0.01, queue=queue)
-        assert task["status"] == "succeeded"
+        assert task["status"] == "cancelled"
     finally:
         await worker.stop()
 
     batch = await queue.get_generation_batch(project_name="planning", batch_id=batch_id)
     assert batch.done is True
-    assert batch.members[0].status == "succeeded"
+    assert batch.members[0].status == "cancelled"
     assert (project_path / "project.json").read_bytes() != before_project
     assert [episode["title"] for episode in projects.load_project("planning")["episodes"]] == ["古玉藏诀"]
     assert (project_path / "source" / "episode_1.txt").exists()
@@ -844,7 +844,7 @@ async def test_cancel_during_started_episode_plan_commit_leaves_member_running_t
         ),
     ],
 )
-async def test_cancel_during_invalid_script_plan_quarantine_leaves_member_running_to_its_refusal(
+async def test_cancel_during_invalid_script_plan_quarantine_keeps_completed_draft(
     tmp_path: Path,
     file_db_factory,
     monkeypatch,
@@ -908,7 +908,7 @@ async def test_cancel_during_invalid_script_plan_quarantine_leaves_member_runnin
         assert task_id is not None
         assert await asyncio.to_thread(started.wait, 1)
         cancelled = await queue.cancel_generation_batch(project_name=project_name, batch_id=batch_id)
-        assert cancelled.model_dump() == {"cancelled": [], "skipped_running": [task_id], "skipped_terminal": []}
+        assert cancelled.model_dump() == {"cancelled": [task_id], "skipped_running": [], "skipped_terminal": []}
     finally:
         release.set()
     try:
@@ -916,9 +916,9 @@ async def test_cancel_during_invalid_script_plan_quarantine_leaves_member_runnin
     finally:
         await worker.stop()
 
-    assert task["status"] == "failed"
-    assert problem_from_task_failure(task["error_message"]).code == "generation_refused"
+    assert task["status"] == "cancelled"
+    assert task["cancelled_by"] == "user"
     batch = await queue.get_generation_batch(project_name=project_name, batch_id=batch_id)
     assert batch.done is True
-    assert batch.members[0].status == "failed"
+    assert batch.members[0].status == "cancelled"
     assert draft_path.exists()

@@ -468,7 +468,7 @@ async def test_unassociated_requested_member_is_a_durable_enqueue_failure(
     assert terminal.generation_result.items[0].task_state.value == "not_queued"
 
 
-async def test_batch_cancel_cancels_queued_members_and_leaves_running_members_to_finish(
+async def test_batch_cancel_cancels_active_members_and_preserves_terminal_members(
     batch_queue: GenerationQueue,
 ) -> None:
     batch_id = await batch_queue.create_generation_batch(
@@ -504,24 +504,24 @@ async def test_batch_cancel_cancels_queued_members_and_leaves_running_members_to
 
     cancelled = await batch_queue.cancel_generation_batch(project_name="demo", batch_id=batch_id)
     assert cancelled.model_dump() == {
-        "cancelled": [queued["task_id"]],
-        "skipped_running": [running["task_id"]],
+        "cancelled": [queued["task_id"], running["task_id"]],
+        "skipped_running": [],
         "skipped_terminal": [finished["task_id"]],
     }
     running_row = await batch_queue.get_task(running["task_id"])
     assert running_row is not None
-    assert running_row["status"] == "running"
+    assert running_row["status"] == "cancelled"
 
     repeated = await batch_queue.cancel_generation_batch(project_name="demo", batch_id=batch_id)
     assert repeated.cancelled == []
-    assert repeated.skipped_running == [running["task_id"]]
-    assert set(repeated.skipped_terminal) == {finished["task_id"], queued["task_id"]}
+    assert repeated.skipped_running == []
+    assert set(repeated.skipped_terminal) == {finished["task_id"], queued["task_id"], running["task_id"]}
 
-    assert await batch_queue.mark_task_succeeded(running["task_id"], {"file_path": "storyboards/running.png"}) == 1
+    assert await batch_queue.mark_task_succeeded(running["task_id"], {"file_path": "storyboards/running.png"}) == 0
     terminal = await batch_queue.get_generation_batch(project_name="demo", batch_id=batch_id)
     assert terminal.done is True
     assert terminal.poll_after_seconds is None
     assert terminal.generation_result is not None
-    assert terminal.generation_result.succeeded == ["running", "finished"]
-    assert terminal.generation_result.failed == ["queued"]
+    assert terminal.generation_result.succeeded == ["finished"]
+    assert terminal.generation_result.failed == ["running", "queued"]
     assert {item.task_state.value for item in terminal.generation_result.items} == {"succeeded", "cancelled"}

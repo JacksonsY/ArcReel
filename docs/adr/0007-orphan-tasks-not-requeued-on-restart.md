@@ -15,7 +15,7 @@ status: accepted
 - 用户视角：重启后正在生成的 video 任务（绝大多数走轮询）会自动接续，体感无感；正在生成的 image 任务（绝大多数走同步）会变成 failed，用户需要手动重新提交。本次范围不做重试 UI（已确认），用户的「重新提交」走现有「点生成按钮」路径——这是 conscious trade-off，目的是把本次 PR 范围控制在「修队列瘫痪」三件事内。
 - 该 ADR 与「GenerationWorker 与 server 主进程始终捆绑」这一事实配套（参见 `lib/generation/generation_worker.py` 模块文档字符串）：单 uvicorn 进程下，唯一的孤儿成因就是重启；没有多 worker 协调时 lease/heartbeat 抖动制造的「假孤儿」（lease 失效但本进程其实活着）问题。若未来真做多 worker，该策略需要重审——具体说，需要区分「本进程刚启动的孤儿」（确实没人在跑）和「其他 worker 还活着的孤儿」（其他进程内存里 asyncio.Task 仍在）。本 ADR 不为该未来场景预留判定逻辑。
 - 孤儿扫描只处理 `running`。`cancelling` 中间态已随「取消只对排队中的任务开放」（`docs/adr/0006-cancel-only-queued-tasks.md`）移除，升级迁移把残留的 `cancelling` 行收敛为 `cancelled`，孤儿扫描不再有这条分支。
-- 与 `docs/adr/0006-cancel-only-queued-tasks.md` 互不重叠也互不冲突：0006 管「哪些任务可以被用户取消」（只有排队中的），0007 管「重启后还没死的任务怎么处理」。重启孤儿走 failed 或 resume，不写 `cancelled`（取消是用户主观意愿，重启是系统事件）。
+- 用户取消的现行行为见 `docs/adr/0098-cancel-running-generation-tasks.md`；本决策只管重启后仍记录为运行中的任务。已取消任务不进入孤儿续跑。重启孤儿走 failed 或 resume，不写 `cancelled`（取消是用户主观意愿，重启是系统事件）。
 - 不要为了「让重启更无感」回退到 requeue：那会把费用模型从「次数计费」变成「次数 × 重启次数」，用户从账单上吃亏，且会让本 ADR 的费用语义保护点失效。
 - `provider_job_id` 持久化必须在进入轮询前**同步完成**——如果 `submit` 已返回 job_id 但 DB 写入失败（如 SQLite I/O 错、连接中断），task 必须立刻标 `failed`、**不**进入轮询。否则该 job 在 provider 那里继续 charge，但 ArcReel 既无法 resume（job_id 没存）也无法 cancel（worker 不知道这个 task 还在跑），形成不可追踪的「幽灵任务」。实现路径：`submit` 后用单独事务先 commit job_id，commit 失败立即抛出由 worker finally 标 failed；commit 成功才进入 `_poll_until_complete` 循环。
 - fail-fast 路径必须**可观测**：`provider_job_id` 持久化失败触发的「标 failed」分支打结构化日志，以稳定 token `provider_job_id_persist_failed` 起头（含 task_id / provider / submit 返回的 job_id / 错误原因），运维侧按该 token 检索即可把「幽灵任务防护触发」从「正常 provider 失败」噪声里挑出来——部署期回归（如 DB 偶发 I/O 故障）会被无声盖住，正是这条防护要避免的失败模式。本仓库无 metrics 基础设施（无 prometheus/statsd/otel 依赖），不为此单独引入计数指标。

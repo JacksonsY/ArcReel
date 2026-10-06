@@ -199,6 +199,9 @@ class FakeWorkerQueue:
     async def persist_execution_provider_id(self, task_id, provider_id):
         self.persisted_providers.append((task_id, provider_id))
 
+    async def get_task(self, task_id):
+        return None
+
     async def acquire_or_renew_worker_lease(self, name, owner_id, ttl_seconds):
         self._lease_calls += 1
         return True

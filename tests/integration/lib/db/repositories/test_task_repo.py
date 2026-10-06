@@ -7,7 +7,7 @@ from sqlalchemy import event, select, update
 
 from lib.db.models.api_call import ApiCall
 from lib.db.models.task import Task
-from lib.db.repositories.task_repo import TaskNotCancellableError, TaskRepository
+from lib.db.repositories.task_repo import TaskRepository
 from lib.db.repositories.usage_repo import SettlementInput, UsageRepository
 from lib.generation.task_failure import encode_failure, render_failure
 from lib.i18n import _ as translate_message
@@ -603,8 +603,7 @@ class TestTaskRepository:
         assert dep_task["status"] == "cancelled"
         assert dep_task["cancelled_by"] == "cascade"
 
-    async def test_cancel_running_task_is_rejected(self, db_session):
-        """取消只对 queued 开放：执行中的任务被拒绝，状态不变。"""
+    async def test_cancel_running_task_preserves_user_cancel_when_executor_finishes(self, db_session):
         repo = TaskRepository(db_session)
 
         task = await repo.enqueue(
@@ -617,14 +616,16 @@ class TestTaskRepository:
         )
         await repo.claim_next("image")
 
-        with pytest.raises(TaskNotCancellableError):
-            await repo.cancel_task(task["task_id"])
-        with pytest.raises(TaskNotCancellableError):
-            await repo.get_cancel_preview(task["task_id"])
+        preview = await repo.get_cancel_preview(task["task_id"])
+        assert preview["task"]["status"] == "running"
+        result = await repo.cancel_task(task["task_id"])
+        assert [row["task_id"] for row in result["cancelled"]] == [task["task_id"]]
+        assert await repo.mark_succeeded(task["task_id"], {}) == 0
+        assert await repo.finalize_interrupted(task["task_id"]) == 0
 
         refreshed = await repo.get(task["task_id"])
-        assert refreshed["status"] == "running"
-        assert refreshed["cancelled_by"] is None
+        assert refreshed["status"] == "cancelled"
+        assert refreshed["cancelled_by"] == "user"
 
     async def test_cancel_preview(self, db_session):
         repo = TaskRepository(db_session)
@@ -731,17 +732,16 @@ class TestCancelCascade:
         )
         return a["task_id"], b["task_id"], c["task_id"]
 
-    async def test_cancel_running_head_is_rejected_and_chain_stays_queued(self, db_session):
+    async def test_cancel_running_head_cascades_to_queued_chain(self, db_session):
         repo = TaskRepository(db_session)
         a, b, c = await self._chain_3(repo)
         await repo.claim_next("image")  # A 拉成 running
 
-        with pytest.raises(TaskNotCancellableError):
-            await repo.cancel_task(a)
-
-        assert (await repo.get(a))["status"] == "running"
-        assert (await repo.get(b))["status"] == "queued"
-        assert (await repo.get(c))["status"] == "queued"
+        result = await repo.cancel_task(a)
+        assert [row["task_id"] for row in result["cancelled"]] == [a, b, c]
+        assert (await repo.get(a))["status"] == "cancelled"
+        assert (await repo.get(b))["status"] == "cancelled"
+        assert (await repo.get(c))["status"] == "cancelled"
 
     async def test_cancel_queued_head_cascades_to_grandchildren(self, db_session):
         """取消排队中的 A → A/B/C 全 cancelled；下游与发起方在 cancelled_by 上可区分。"""

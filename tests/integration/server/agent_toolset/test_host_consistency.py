@@ -98,6 +98,8 @@ SAMPLE_ARGUMENTS: dict[str, dict[str, Any]] = {
     "get_prompt_preview": {"script": "episode_1.json", "item_id": "E1S01"},
     "get_generation_batch": {"batch_id": "batch-absent"},
     "cancel_generation_batch": {"batch_id": "batch-absent"},
+    "cancel_generation_task": {"task_id": "task-absent"},
+    "list_generation_tasks": {},
     "patch_project": {"overview": {"synopsis": "梗概"}},
     "patch_episode_meta": {"script": "episode_1.json", "field": "title", "value": "第一集"},
     "rename_asset": {"table": "characters", "old_name": "甲", "new_name": "乙"},
@@ -534,6 +536,7 @@ _PROBLEM_ON_SAMPLE = frozenset(
         GET_PROMPT_PREVIEW.name,
         GET_GENERATION_BATCH.name,
         CANCEL_GENERATION_BATCH.name,
+        "cancel_generation_task",
         # 测试项目已有正式脚本：确认需要覆盖认可，取回编辑副本被拒；没有在场草稿可改、可晋升。
         CONFIRM_SCRIPT_REVIEW.name,
         OPEN_DRAFT.name,

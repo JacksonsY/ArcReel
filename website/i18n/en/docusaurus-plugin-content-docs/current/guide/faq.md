@@ -220,7 +220,7 @@ The status bar in the header shows only how many episodes are completed and the 
 
 ### What should I do when a task is queued, running, failed, canceled, or interrupted by a service restart? {#task-states}
 
-Image, video, and audio jobs use independent task channels. Only queued tasks can be canceled. Once a task starts running, it can no longer be canceled: the provider call already sent runs to completion and its result is saved as an artifact, so the cost already incurred is not wasted. If you are not satisfied with the result, switch back to an earlier version in the version history or regenerate. If you cancel a task with dependencies, the UI lists the queued downstream tasks that will be canceled with it.
+Image, video, and audio jobs use independent task channels. You can cancel queued or running tasks individually in the usage panel, or ask the embedded Agent to find and stop tasks in the current project. Canceling a running task stops local execution, but the provider may continue generating and charging; refunds are not guaranteed. Completed artifacts are kept, and an atomic write already in progress finishes safely. The UI lists queued downstream tasks that will also be canceled. **Cancel all queued tasks** still affects only queued tasks.
 
 The task panel does not have one retry button that works for every task type. After a failure, expand the error details, correct the configuration or input, then regenerate from the corresponding asset, storyboard, or video action. Do not click Generate repeatedly before understanding the cause.
 

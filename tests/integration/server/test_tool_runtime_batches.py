@@ -19,11 +19,15 @@ from lib.workflow.workflow_state import WorkflowStatus
 from server.tool_runtime import (
     CallerContext,
     GenerationBatchToolRequest,
+    GenerationTaskCancelRequest,
+    GenerationTasksListRequest,
     ProjectScope,
     Services,
     ToolRequest,
     cancel_generation_batch,
+    cancel_generation_task,
     get_generation_batch,
+    list_generation_tasks,
     submit_media_generation,
 )
 
@@ -310,7 +314,7 @@ async def test_batch_query_and_cancellation_read_the_durable_queue(db_factory, t
     }
 
 
-async def test_batch_cancellation_leaves_a_running_member_to_finish(db_factory, tmp_path: Path) -> None:
+async def test_batch_cancellation_terminates_running_members(db_factory, tmp_path: Path) -> None:
     queue = GenerationQueue(session_factory=db_factory)
     batch_id = await _storyboard_batch(queue, ["E1S01", "E1S02"])
     running = await _enqueue_storyboard(queue, batch_id, "E1S01")
@@ -326,17 +330,47 @@ async def test_batch_cancellation_leaves_a_running_member_to_finish(db_factory, 
 
     assert cancelled.value is not None
     assert cancelled.value.model_dump(mode="json") == {
-        "cancelled": [queued["task_id"]],
-        "skipped_running": [running["task_id"]],
+        "cancelled": [running["task_id"], queued["task_id"]],
+        "skipped_running": [],
         "skipped_terminal": [],
     }
     running_row = await queue.get_task(running["task_id"])
     assert running_row is not None
-    assert running_row["status"] == "running"
-    assert await queue.mark_task_succeeded(running["task_id"], {"file_path": "storyboards/E1S01.png"}) == 1
+    assert running_row["status"] == "cancelled"
+    assert await queue.mark_task_succeeded(running["task_id"], {"file_path": "storyboards/E1S01.png"}) == 0
     read = await get_generation_batch(request, scope, caller, services)
     assert read.value is not None
     assert [(member.unit_id, member.status) for member in read.value.members] == [
-        ("E1S01", "succeeded"),
+        ("E1S01", "cancelled"),
         ("E1S02", "cancelled"),
     ]
+
+
+@pytest.mark.parametrize("source", ["embedded", "mcp"])
+async def test_single_task_cancellation_checks_project_and_user_scope(db_factory, tmp_path: Path, source) -> None:
+    queue = GenerationQueue(session_factory=db_factory)
+    batch_id = await _storyboard_batch(queue, ["E1S01"])
+    task = await _enqueue_storyboard(queue, batch_id, "E1S01")
+    await queue.claim_next_task("image")
+    services, scope = _batch_services(tmp_path, queue)
+    request = ToolRequest(GenerationTaskCancelRequest(task_id=task["task_id"]))
+    caller = CallerContext(user_id="default", source=source)
+    foreign_scope = ProjectScope(project_name="other", data_root=tmp_path)
+    list_request = ToolRequest(GenerationTasksListRequest())
+    listed = await list_generation_tasks(list_request, scope, caller, services)
+    assert [item["task_id"] for item in listed.value["items"]] == [task["task_id"]]
+    assert "payload" not in listed.value["items"][0]
+    for denied_scope, denied_caller in (
+        (foreign_scope, caller),
+        (scope, CallerContext(user_id="other", source=source)),
+    ):
+        hidden = await list_generation_tasks(list_request, denied_scope, denied_caller, services)
+        assert hidden.value["items"] == []
+        denied = await cancel_generation_task(request, denied_scope, denied_caller, services)
+        assert denied.problem is not None
+        assert denied.problem.code == "task_not_found"
+        assert (await queue.get_task(task["task_id"]))["status"] == "running"
+    cancelled = await cancel_generation_task(request, scope, caller, services)
+    assert cancelled.problem is None
+    assert cancelled.value["cancelled"][0]["task_id"] == task["task_id"]
+    assert (await queue.get_task(task["task_id"]))["cancelled_by"] == "user"

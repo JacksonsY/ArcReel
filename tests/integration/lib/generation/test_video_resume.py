@@ -10,7 +10,9 @@ from lib.generation.video_resume import cleanup_video_staging
 from lib.script.script_editor import ScriptEditError
 from tests.integration.lib.generation.worker_support import (
     FakeWorkerQueue,
+    db_queue,
     reference_checkpoint_json,
+    seed_running_task,
     stage_task_dir,
     storyboard_resume_task,
     stub_executors,
@@ -26,6 +28,50 @@ async def _stored_calls(session) -> list[ApiCall]:
 class TestVideoResumeRunner:
     """续跑：分流、provider 锁定、调用行结算与 staging 清理。"""
 
+    async def test_user_cancel_stops_resume_and_cleans_staging(self, worker_db, staged_project):
+        from lib.db.repositories.usage_repo import UsageRepository
+
+        task = storyboard_resume_task("cancel-resume", job_id="already-submitted")
+        await seed_running_task(worker_db, task["task_id"], task_type="video", media_type="video")
+        async with worker_db() as session:
+            await UsageRepository(session).start_call(
+                project_name="demo", call_type="video", model="m", task_id=task["task_id"]
+            )
+        staged = stage_task_dir(staged_project, task["task_id"])
+        queue = db_queue(worker_db)
+        started = asyncio.Event()
+
+        async def resume(_task, *, job_id):
+            assert job_id == "already-submitted"
+            started.set()
+            await asyncio.Event().wait()
+            return {}
+
+        async def projection(_task):
+            return "test"
+
+        worker = GenerationWorker(
+            queue=queue,
+            provider_projection=projection,
+            executor=stub_executors.execute,
+            resume_executor=resume,
+        )
+        active = asyncio.create_task(worker._resume.run(task))
+        try:
+            await asyncio.wait_for(started.wait(), timeout=5)
+            await queue.cancel_task(task["task_id"])
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(active, timeout=5)
+            assert not staged.exists()
+            assert (await queue.get_task(task["task_id"]))["cancelled_by"] == "user"
+            async with worker_db() as session:
+                calls = await _stored_calls(session)
+            assert calls[0].status == "cancelled"
+        finally:
+            if not active.done():
+                active.cancel()
+                await asyncio.gather(active, return_exceptions=True)
+
     @pytest.mark.asyncio
     async def test_video_orphan_cleanup_removes_provider_media_and_task_output(self, tmp_path, monkeypatch):
         from lib.generation.media_generator import task_video_staging_path
@@ -40,7 +86,7 @@ class TestVideoResumeRunner:
         (provider_media / "000-start_image.png").write_bytes(b"staged-input")
 
         class _ProjectManager:
-            def get_project_path(self, _project_name):
+            def get_project_path(self, _project_name, *, allow_cancelled=False):
                 return project_path
 
         monkeypatch.setattr("lib.generation.video_resume.get_project_manager", lambda: _ProjectManager())

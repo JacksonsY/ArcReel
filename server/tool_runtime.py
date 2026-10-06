@@ -326,6 +326,20 @@ class GenerationBatchToolRequest(BaseModel):
     batch_id: str = Field(min_length=1, description="生成批次 id，取自生成工具返回的 generation_batch.batch_id")
 
 
+class GenerationTaskCancelRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    task_id: str = Field(min_length=1, description="任务 id，取自 list_generation_tasks 或生成批次成员的 task_id")
+
+
+class GenerationTasksListRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    status: Literal["queued", "running"] = Field(default="running", description="要查询的任务状态")
+    page: int = Field(default=1, ge=1, description="页码，从 1 开始")
+    page_size: int = Field(default=50, ge=1, le=500, description="每页任务数，最多 500")
+
+
 @dataclass(frozen=True, slots=True)
 class MediaGenerationSubmission:
     batch: GenerationBatchReadModel
@@ -455,6 +469,42 @@ async def cancel_generation_batch(
     except Exception as exc:
         return ToolOutcome(problem=ToolProblem("internal_error", f"cancel_generation_batch 失败: {exc}"))
     return ToolOutcome(value=result)
+
+
+async def cancel_generation_task(
+    request: ToolRequest[GenerationTaskCancelRequest],
+    scope: ProjectScope,
+    caller: CallerContext,
+    services: Services,
+) -> ToolOutcome[Any]:
+    task = await services.queue.get_task(request.value.task_id)
+    if task is None or task["project_name"] != scope.project_name or task["user_id"] != caller.user_id:
+        return ToolOutcome(problem=ToolProblem("task_not_found", "任务不存在或不属于当前项目"))
+    try:
+        result = await services.queue.cancel_task(request.value.task_id)
+    except ValueError:
+        return ToolOutcome(problem=ToolProblem("task_not_found", "任务不存在或不属于当前项目"))
+    except Exception as exc:
+        return ToolOutcome(problem=ToolProblem("internal_error", f"cancel_generation_task 失败: {exc}"))
+    return ToolOutcome(value=result)
+
+
+async def list_generation_tasks(
+    request: ToolRequest[GenerationTasksListRequest],
+    scope: ProjectScope,
+    caller: CallerContext,
+    services: Services,
+) -> ToolOutcome[Any]:
+    result = await services.queue.list_tasks(
+        project_name=scope.project_name,
+        user_id=caller.user_id,
+        status=request.value.status,
+        page=request.value.page,
+        page_size=request.value.page_size,
+    )
+    # 只返回任务定位与状态，不把执行载荷或供应商响应暴露给 Agent。
+    fields = ("task_id", "task_type", "media_type", "resource_id", "script_file", "status", "source", "started_at")
+    return ToolOutcome(value={**result, "items": [{key: task[key] for key in fields} for task in result["items"]]})
 
 
 class PatchUpdateOperation(BaseModel):

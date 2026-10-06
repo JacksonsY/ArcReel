@@ -33,6 +33,7 @@ from lib.infra.async_thread import run_noninterruptible_async
 from lib.project.asset_derivatives import DERIVATIVE_TASK_TYPE
 from lib.project.project_manager import ProjectManager
 from lib.project.project_migration_guard import assert_project_migration_ok
+from lib.project.task_project_claim import cancel_task_project_claims
 
 if TYPE_CHECKING:
     from lib.artifacts.artifact_activation import ArtifactCurrencyResolver
@@ -708,9 +709,10 @@ class GenerationQueue:
             return await repo.finalize_interrupted(task_id)
 
     async def cancel_task(self, task_id: str) -> dict[str, Any]:
-        """取消排队中的任务及其排队中下游；执行中的任务抛 ``TaskNotCancellableError``。"""
+        """取消排队或执行中的任务及其排队中下游；提交后终止本进程的执行。"""
         async with self._task_repo() as repo:
             result = await repo.cancel_task(task_id)
+        cancel_task_project_claims(task["task_id"] for task in result["cancelled"])
         if result["cancelled"]:
             logger.info("任务取消 task_id=%s cancelled=%d", task_id, len(result["cancelled"]))
         return result
@@ -747,6 +749,7 @@ class GenerationQueue:
         status: str | None = None,
         task_type: str | None = None,
         source: str | None = None,
+        user_id: str | None = None,
         page: int = 1,
         page_size: int = 50,
     ) -> dict[str, Any]:
@@ -757,6 +760,7 @@ class GenerationQueue:
                 status=status,
                 task_type=task_type,
                 source=source,
+                user_id=user_id,
                 page=page,
                 page_size=page_size,
             )

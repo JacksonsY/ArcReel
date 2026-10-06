@@ -764,11 +764,7 @@ class TestDispatcherFailFastAndPendingTracking:
 
     @pytest.mark.asyncio
     async def test_acquired_pre_process_interruption_lands_terminal(self, staged_project):
-        """acquire 后、VideoResumeRunner.run 入 try 之前被打断：_run_one 兜底落终态。
-
-        漏窗就是 VideoResumeRunner.run 内 try 块之前那段 provider 投影 await：打断落在
-        那里时内部不会落终态，必须由 _run_one 兜底。任务不带 checkpoint 才会走到投影。
-        """
+        """acquire 后在 provider 投影期间被打断：续跑入口与派发兜底幂等落终态。"""
         queue = FakeWorkerQueue()
 
         acquired_event = asyncio.Event()
@@ -808,8 +804,8 @@ class TestDispatcherFailFastAndPendingTracking:
         pre_try_gate.set()
         await dispatcher
 
-        # 必须落终态，不能停在 running
-        assert queue.interrupted == ["orphan-pre-try"]
+        # 入口已覆盖投影 await，派发仍有幂等兜底；只收口这个任务。
+        assert set(queue.interrupted) == {"orphan-pre-try"}
 
     @pytest.mark.asyncio
     async def test_dispatcher_handle_set_after_handle_orphan(self, monkeypatch, staged_project):
