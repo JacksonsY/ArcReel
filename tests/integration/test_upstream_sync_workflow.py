@@ -70,6 +70,26 @@ def test_upstream_merge_preserves_fork_and_stops_on_conflicts(tmp_path: Path, sc
         assert git("rev-parse", "HEAD^1") == before
         assert git("rev-parse", "HEAD^2") == upstream
         assert output.read_text(encoding="utf-8") == f"changed=true\nsha={git('rev-parse', 'HEAD')}\n"
+        git("checkout", "--detach")
+        docker = yaml.safe_load((workflow.parent / "docker-edge.yml").read_text(encoding="utf-8"))
+        image_step = next(step for step in docker["jobs"]["build-and-push"]["steps"] if step.get("id") == "image")
+        image_output, image_env = tmp_path / "image-output", tmp_path / "image-env"
+        subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", image_step["run"]],
+            cwd=checkout,
+            env={
+                **os.environ,
+                "REPO": "JacksonsY/ArcReel",
+                "GITHUB_OUTPUT": str(image_output),
+                "GITHUB_ENV": str(image_env),
+            },
+            check=True,
+        )
+        assert image_env.read_text(encoding="utf-8") == "IMAGE_NAME_LC=jacksonsy/arcreel\n"
+        assert (
+            image_output.read_text(encoding="utf-8")
+            == f"sha={git('rev-parse', 'HEAD')}\nsha_short={git('rev-parse', '--short=7', 'HEAD')}\n"
+        )
     else:
         assert git("rev-parse", "HEAD") == before
         if scenario == "unchanged":
