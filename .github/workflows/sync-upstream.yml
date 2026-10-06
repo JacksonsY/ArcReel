@@ -29,8 +29,10 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Fetch official main
-        run: git fetch https://github.com/ArcReel/ArcReel.git main:refs/remotes/upstream/main
+      - name: Fetch official main and version tags
+        run: |
+          git fetch --no-tags https://github.com/ArcReel/ArcReel.git \
+            main:refs/remotes/upstream/main 'refs/tags/v*:refs/upstream/tags/v*'
 
       - name: Merge upstream and keep fork Actions
         id: merge
@@ -59,13 +61,13 @@ jobs:
           echo "changed=true" >> "$GITHUB_OUTPUT"
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Push merged main
-        if: steps.merge.outputs.changed == 'true'
+      - name: Push main and official version tags
+        id: push
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh auth setup-git
-          git push origin HEAD:main
+          git push --atomic origin HEAD:main 'refs/upstream/tags/v*:refs/tags/v*'
 
   docker:
     needs: sync
