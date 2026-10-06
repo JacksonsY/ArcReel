@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AlertCircle, Loader2 } from "lucide-react";
 
@@ -16,6 +16,10 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
+import { SaveBar } from "@/components/shared/edit-unit/SaveBar";
+import { useEditUnit } from "@/components/shared/edit-unit/useEditUnit";
+import { PageShellFooter } from "@/components/shared/page-shell/PageShell";
 import { useAppStore } from "@/stores/app-store";
 import { errMsg, voidCall } from "@/utils/async";
 
@@ -37,9 +41,28 @@ function FileList({ files, label }: { files: string[]; label?: string }) {
   );
 }
 
-/** 「Agent 配置」：项目内 Agent 配置的状态，以及「重置为内置配置」。重置不可撤销，经 AlertDialog 确认。 */
-export function AgentProfileTab({ projectName }: { projectName: string }) {
+/** 项目全局提示词独立保存；配置文件的重置不可撤销，经 AlertDialog 确认。 */
+export function AgentProfileTab({
+  projectName,
+  globalPrompt,
+  onPromptSaved,
+}: {
+  projectName: string;
+  globalPrompt: string;
+  onPromptSaved: (prompt: string) => void;
+}) {
   const { t } = useTranslation("dashboard");
+  const promptId = useId();
+  const savePrompt = useCallback(
+    async (value: string) => {
+      const result = await API.updateProject(projectName, { agent_global_prompt: value.trim() || null });
+      const next = result.project.agent_global_prompt ?? "";
+      onPromptSaved(next);
+      return next;
+    },
+    [projectName, onPromptSaved],
+  );
+  const promptUnit = useEditUnit({ source: globalPrompt, save: savePrompt });
   const [status, setStatus] = useState<AgentProfileStatus | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loadCount, setLoadCount] = useState(0);
@@ -96,6 +119,24 @@ export function AgentProfileTab({ projectName }: { projectName: string }) {
   return (
     <div className="flex flex-col gap-6">
       <TabHeader title={t("agent_profile_title")} description={t("agent_profile_description")} />
+
+      <SettingsBlock title={t("agent_global_prompt")} titleId={promptId}>
+        <p id={`${promptId}-description`} className="text-sm text-muted-foreground">
+          {t("agent_global_prompt_description")}
+        </p>
+        <Textarea
+          aria-labelledby={promptId}
+          aria-describedby={`${promptId}-description`}
+          value={promptUnit.value}
+          onChange={(event) => promptUnit.setValue(event.target.value)}
+          placeholder={t("agent_global_prompt_placeholder")}
+          rows={6}
+          disabled={promptUnit.status === "saving"}
+        />
+      </SettingsBlock>
+      <PageShellFooter>
+        <SaveBar unit={promptUnit} />
+      </PageShellFooter>
 
       {loadError ? (
         <Alert variant="destructive">

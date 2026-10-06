@@ -938,6 +938,9 @@ export default {
   // ProjectSettingsPage
   'project_settings': 'Project Settings',
   'agent_profile_title': 'Agent profile',
+  'agent_global_prompt': 'Global prompt',
+  'agent_global_prompt_description': 'Add instructions for this project’s built-in Agent. Saved changes apply to new conversations; existing conversations keep their current instructions. Leave blank to add no extra rules.',
+  'agent_global_prompt_placeholder': 'For example: keep replies concise and outline the creative plan before generating a script.',
   'agent_profile_description': 'Project Agent instructions upgrade safely with built-ins while preserving local customizations.',
   'agent_profile_customized': 'Customized project profile detected',
   'agent_profile_builtin': 'Using built-in configuration',

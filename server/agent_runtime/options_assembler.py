@@ -31,6 +31,8 @@ from lib.db.base import DEFAULT_USER_ID
 from lib.db.engine import async_session_factory as default_async_session_factory
 from lib.i18n import DEFAULT_LOCALE, LOCALE_LANGUAGE_MAP
 from lib.infra.data_root_layout import DataRootLayout
+from lib.infra.json_io import load_json_or_none
+from lib.infra.schema_guards import is_mapping
 from lib.prompts.prompt_templates.builtin import builtin_templates
 from server.agent_runtime.agent_access_policy import AgentAccessPolicy
 from server.agent_runtime.arcreel_mcp import build_arcreel_mcp_server
@@ -137,8 +139,9 @@ class OptionsAssembler:
 
         Combines the locale language regulation, the session-invariant project
         context (identity, cwd, operating rules) and the user-memory segment.
-        Mutable project metadata is not included here — it lives in project.json
-        and is read on demand. The project's CLAUDE.md (mode variant projected
+        Configured project-wide instructions are captured when a session starts.
+        Other mutable metadata lives in project.json and is read on demand.
+        The project's CLAUDE.md (mode variant projected
         into the cwd, carrying the Agent persona) is auto-loaded by the SDK via
         setting_sources=["project"].
         """
@@ -148,6 +151,13 @@ class OptionsAssembler:
         project_context = self._build_project_context(project_name)
         if project_context:
             parts.append(project_context)
+            project = await asyncio.to_thread(
+                load_json_or_none, self._resolve_project_cwd(project_name) / "project.json"
+            )
+            if project is not None and is_mapping(project):
+                prompt = project.get("agent_global_prompt")
+                if isinstance(prompt, str) and prompt.strip():
+                    parts.append(f"## 项目全局提示词\n\n{prompt.strip()}")
 
         user_memory = await self._build_user_memory_section()
         if user_memory:

@@ -937,6 +937,9 @@ export default {
   // ProjectSettingsPage
   'project_settings': '项目设置',
   'agent_profile_title': 'Agent 配置',
+  'agent_global_prompt': '全局提示词',
+  'agent_global_prompt_description': '补充本项目内置 Agent 的工作要求。保存后对新会话生效，已有会话保持原配置。留空则不追加规则。',
+  'agent_global_prompt_placeholder': '例如：回答保持简洁，生成脚本前先列出创作计划。',
   'agent_profile_description': '项目内的 Agent 指令会随内置配置安全升级，并保留你的本地定制。',
   'agent_profile_customized': '检测到项目定制配置',
   'agent_profile_builtin': '正在使用内置配置',

@@ -2,6 +2,7 @@
 
 import pytest
 
+from lib.project.project_manager import ProjectManager
 from tests.integration.server.routers.projects_router_support import (
     _FakePM,
     build_projects_client,
@@ -9,6 +10,26 @@ from tests.integration.server.routers.projects_router_support import (
 
 
 class TestProjectsRouter:
+    def test_global_prompt_persists_preserves_omitted_value_and_clears(self, tmp_path, monkeypatch):
+        manager = ProjectManager(tmp_path)
+        manager.create_project("ready")
+        manager.create_project_metadata("ready")
+        client = build_projects_client(monkeypatch, manager)
+        with client:
+            response = client.patch(
+                "/api/v1/projects/ready", json={"agent_global_prompt": "  先列计划。\n保持简洁。  "}
+            )
+            assert response.status_code == 200
+            assert manager.load_project("ready")["agent_global_prompt"] == "先列计划。\n保持简洁。"
+            response = client.patch("/api/v1/projects/ready", json={"title": "Updated"})
+            assert response.json()["project"]["agent_global_prompt"] == "先列计划。\n保持简洁。"
+            response = client.patch("/api/v1/projects/ready", json={"agent_global_prompt": ["invalid"]})
+            assert response.status_code == 422
+            assert manager.load_project("ready")["agent_global_prompt"] == "先列计划。\n保持简洁。"
+            response = client.patch("/api/v1/projects/ready", json={"agent_global_prompt": None})
+            assert response.status_code == 200
+            assert "agent_global_prompt" not in manager.load_project("ready")
+
     def test_update_project_with_style_template_id_expands_and_clears_image(self, tmp_path, monkeypatch):
         """PATCH style_template_id：写入 id + 展开 prompt 到 style，并清掉 style_image/description。"""
         fake_pm = _FakePM(tmp_path)

@@ -689,6 +689,37 @@ describe("ProjectSettingsPage – 配音", () => {
 });
 
 describe("ProjectSettingsPage – Agent 配置", () => {
+  it("全局提示词独立保存、切换分页后保留，清空只清除追加规则", async () => {
+    const updateSpy = mockProject({ agent_global_prompt: "先列计划。" });
+    renderAt("/app/projects/demo/settings?tab=agent");
+    const prompt = await screen.findByRole("textbox", { name: "全局提示词" });
+    expect(prompt).toHaveValue("先列计划。");
+    expect(screen.getByText(/保存后对新会话生效/)).toBeInTheDocument();
+    fireEvent.change(prompt, { target: { value: "  保持简洁。\n使用中文。  " } });
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(updateSpy).toHaveBeenCalledWith("demo", { agent_global_prompt: "保持简洁。\n使用中文。" }));
+    await waitFor(() => expect(prompt).toHaveValue("保持简洁。\n使用中文。"));
+    fireEvent.click(within(sidebar()).getByRole("link", { name: "基础" }));
+    fireEvent.click(within(sidebar()).getByRole("link", { name: "Agent 配置" }));
+    const reopened = await screen.findByRole("textbox", { name: "全局提示词" });
+    expect(reopened).toHaveValue("保持简洁。\n使用中文。");
+    fireEvent.change(reopened, { target: { value: "" } });
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(updateSpy).toHaveBeenLastCalledWith("demo", { agent_global_prompt: null }));
+  });
+
+  it("离开 Agent 配置前拦截未保存的全局提示词", async () => {
+    const updateSpy = mockProject({});
+    const { location } = renderAt("/app/projects/demo/settings?tab=agent");
+    fireEvent.change(await screen.findByRole("textbox", { name: "全局提示词" }), { target: { value: "请先列计划。" } });
+    fireEvent.click(within(sidebar()).getByRole("link", { name: "基础" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "有未保存的修改" });
+    expect(location.history.at(-1)).toBe("/app/projects/demo/settings?tab=agent");
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存并离开" }));
+    await waitFor(() => expect(updateSpy).toHaveBeenCalledWith("demo", { agent_global_prompt: "请先列计划。" }));
+    await waitFor(() => expect(location.history.at(-1)).toBe("/app/projects/demo/settings?tab=basics"));
+  });
+
   it("shows customized Agent Profile files and resets only after destructive confirmation", async () => {
     mockProject({});
     vi.spyOn(API, "getAgentProfileStatus").mockResolvedValue({

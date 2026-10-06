@@ -235,6 +235,22 @@ async def test_build_system_prompt_renders_language_rule_for_locale(tmp_path: Pa
     assert "ArcReel Agent" not in append
 
 
+@pytest.mark.parametrize("value", ["先列出创作计划。\n保持角色设定一致。", "  ", None, ["invalid"]])
+async def test_project_global_prompt_is_scoped_and_appended(tmp_path: Path, value: object) -> None:
+    assembler = _make_assembler(tmp_path)
+    project_json = tmp_path / "projects" / "demo" / "project.json"
+    project_json.write_text(json.dumps({"agent_global_prompt": value}), encoding="utf-8")
+
+    prompt = await assembler._build_append_prompt("demo")
+
+    if isinstance(value, str) and value.strip():
+        assert f"## 项目全局提示词\n\n{value}" in prompt
+    else:
+        assert "## 项目全局提示词" not in prompt
+    assert "## 当前项目上下文" in prompt
+    assert "## 项目全局提示词" not in await assembler._build_append_prompt("other")
+
+
 @pytest.mark.asyncio
 async def test_build_sandbox_disabled_strips_bash(tmp_path: Path) -> None:
     """sandbox 关闭（Windows 回退）→ Bash 系列剥离出 allowed_tools。"""

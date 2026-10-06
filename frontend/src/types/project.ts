@@ -184,6 +184,7 @@ export interface ModelSettingEntry {
 
 export interface ProjectData {
   title: string;
+  agent_global_prompt?: string | null;
   content_mode: "narration" | "drama" | "ad";
   style: string;
   style_template_id?: string | null;

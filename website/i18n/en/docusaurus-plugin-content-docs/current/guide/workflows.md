@@ -472,3 +472,9 @@ An episode or short video is complete only when it meets at least the following 
 - Actual costs have been reviewed;
 - The final video or Jianying draft opens correctly;
 - The project has been archived or backed up.
+
+## 11. Project-wide Agent Prompt {#project-agent-global-prompt}
+
+Enter a **Global prompt** under **Project Settings → Agent profile** to add instructions for this project's built-in Agent, such as reply style, creative steps, or content constraints. These instructions apply only to the current project.
+
+After saving, new conversations include these instructions; existing conversations keep their original configuration. Start a new conversation to use an updated prompt. Clear the field and save to remove the additional rules while preserving the built-in and customized project configuration.

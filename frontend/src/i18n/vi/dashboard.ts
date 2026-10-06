@@ -928,6 +928,9 @@ export default {
   // ProjectSettingsPage
   'project_settings': 'Cài đặt dự án',
   'agent_profile_title': 'Hồ sơ Agent',
+  'agent_global_prompt': 'Lời nhắc toàn cục',
+  'agent_global_prompt_description': 'Bổ sung chỉ dẫn cho Agent tích hợp của dự án này. Thay đổi đã lưu áp dụng cho hội thoại mới; hội thoại hiện có giữ nguyên chỉ dẫn. Để trống nếu không cần quy tắc bổ sung.',
+  'agent_global_prompt_placeholder': 'Ví dụ: trả lời ngắn gọn và trình bày kế hoạch sáng tạo trước khi tạo kịch bản.',
   'agent_profile_description': 'Chỉ dẫn Agent trong dự án được nâng cấp an toàn theo cấu hình tích hợp và vẫn giữ các tùy chỉnh cục bộ.',
   'agent_profile_customized': 'Đã phát hiện hồ sơ dự án tùy chỉnh',
   'agent_profile_builtin': 'Đang dùng cấu hình tích hợp',

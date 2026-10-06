@@ -314,6 +314,7 @@ class EpisodePatch(BaseModel):
 class UpdateProjectRequest(BaseModel):
     title: str | None = None
     style: str | None = None
+    agent_global_prompt: str | None = None
     aspect_ratio: str | None = None
     default_duration: int | None = None
     # 单集目标时长（秒）：显式 null 清除该偏好；ad 项目对字段出现本身即拒绝
@@ -1002,6 +1003,12 @@ async def update_project(name: str, req: UpdateProjectRequest, _t: Translator):
                     project["title"] = req.title
                 if req.style is not None:
                     project["style"] = req.style
+                if "agent_global_prompt" in req.model_fields_set:
+                    prompt = (req.agent_global_prompt or "").strip()
+                    if prompt:
+                        project["agent_global_prompt"] = prompt
+                    else:
+                        project.pop("agent_global_prompt", None)
                 for field in _PROJECT_BACKEND_FIELDS:
                     if field in req.model_fields_set:
                         value = getattr(req, field)

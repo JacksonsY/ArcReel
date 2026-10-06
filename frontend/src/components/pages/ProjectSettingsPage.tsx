@@ -73,6 +73,7 @@ function parseTab(search: string): ProjectSettingsTab {
 
 interface LoadedSettings {
   source: ProjectSettingsForm;
+  agentGlobalPrompt: string;
   title: string;
   facts: ProjectFacts & { sourceLanguage: string | null };
   globals: GlobalModelDefaults;
@@ -114,6 +115,7 @@ async function loadSettings(projectName: string, signal: AbortSignal): Promise<L
   const project = projectRes.project as unknown as Record<string, unknown>;
   return {
     source: deriveForm(projectRes.project, projectName, globals),
+    agentGlobalPrompt: typeof project.agent_global_prompt === "string" ? project.agent_global_prompt : "",
     title: typeof project.title === "string" ? project.title : "",
     facts: {
       contentMode: typeof project.content_mode === "string" ? project.content_mode : "narration",
@@ -281,6 +283,7 @@ function LoadedProjectSettings({ projectName, loaded }: { projectName: string; l
   const { t } = useTranslation("dashboard");
   const tab = parseTab(useSearch());
   const { facts, globals } = loaded;
+  const [agentGlobalPrompt, setAgentGlobalPrompt] = useState(loaded.agentGlobalPrompt);
 
   const { candidates, error: candidatesError, retrying: candidatesRetrying, reload: reloadCandidates } =
     useModelCandidates();
@@ -436,7 +439,9 @@ function LoadedProjectSettings({ projectName, loaded }: { projectName: string; l
       );
       break;
     case "agent":
-      content = <AgentProfileTab projectName={projectName} />;
+      content = (
+        <AgentProfileTab projectName={projectName} globalPrompt={agentGlobalPrompt} onPromptSaved={setAgentGlobalPrompt} />
+      );
       break;
   }
 
