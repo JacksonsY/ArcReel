@@ -519,6 +519,7 @@ function CredentialDialog({
                           {secretInputLabel(t, field, secretFields.length)}
                         </label>
                         <Input
+                          mono
                           id={`${idPrefix}-${field.key}`}
                           type="password"
                           autoComplete="off"
@@ -621,7 +622,7 @@ function DeleteCredentialDialog({
         <AlertDialogHeader>
           <AlertDialogTitle>{t("credential_delete_title", { name: shown?.name ?? "" })}</AlertDialogTitle>
         </AlertDialogHeader>
-        <AlertDialogBody>
+        <AlertDialogBody tabIndex={0} role="region" aria-label={t("credential_delete_title", { name: shown?.name ?? "" })}>
           <div className="flex flex-col gap-2">
             <AlertDialogDescription>
               {shown?.is_active ? t("credential_delete_active_description") : t("credential_delete_description")}

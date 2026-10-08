@@ -1,20 +1,18 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
-import { API } from "@/api";
 import { SourceUploadDialog, type SourceUploadResult } from "@/components/canvas/episodes/SourceUploadDialog";
-import { AgentHandoffHint } from "@/components/copilot/AgentHandoffHint";
 import { useCostStore } from "@/stores/cost-store";
-import { useProjectsStore } from "@/stores/projects-store";
+import { useOverviewGenerateStore } from "@/stores/overview-generate-store";
 import type { ProjectData, ProjectOverview } from "@/types";
-import { errMsg } from "@/utils/async";
-import { outputTruncationOfError } from "@/utils/output-truncation";
 
 import { AdBrief } from "./AdBrief";
 import { AdProducts } from "./AdProducts";
 import { AssetProgressLine } from "./AssetProgressLine";
 import { CostLine } from "./CostLine";
+import { HandoffTip } from "./HandoffTip";
 import { OverviewHeader } from "./OverviewHeader";
-import { StorySetting, type StoryGenerateError } from "./StorySetting";
+import { StorySetting } from "./StorySetting";
+import { useHandoffTipStore } from "./useHandoffTip";
 import { WelcomeCanvas } from "./WelcomeCanvas";
 
 interface OverviewCanvasProps {
@@ -49,67 +47,29 @@ export function OverviewCanvas({ projectName, projectData, readOnly = false }: O
   const [upload, setUpload] = useState<{ projectName: string; files: File[] } | null>(null);
   const uploadFiles = upload?.projectName === projectName ? upload.files : null;
 
-  // 从原文生成故事设定：首次上传后自动开始，或由「从原文生成」触发。按项目记录，切项目时作废。
-  const [generatingFor, setGeneratingFor] = useState<string | null>(null);
-  const [generateError, setGenerateError] = useState<{ projectName: string; error: StoryGenerateError } | null>(null);
-  const generating = generatingFor === projectName;
-  const generateControllerRef = useRef<AbortController | null>(null);
-  useEffect(() => () => generateControllerRef.current?.abort(), [projectName]);
-
-  const runGenerate = useCallback(async () => {
-    generateControllerRef.current?.abort();
-    const controller = new AbortController();
-    generateControllerRef.current = controller;
-    setGeneratingFor(projectName);
-    setGenerateError(null);
-    try {
-      await API.generateOverview(projectName, { signal: controller.signal });
-      if (controller.signal.aborted) return;
-      // refreshProject 以结算值报告失败而不 reject：生成已落盘却停在旧内容上，会引人再生成一次
-      const refreshed = await useProjectsStore.getState().refreshProject(projectName);
-      if (refreshed === "failed" && !controller.signal.aborted) {
-        setGenerateError({ projectName, error: { kind: "refresh" } });
-      }
-    } catch (err) {
-      if (controller.signal.aborted) return;
-      setGenerateError({
-        projectName,
-        error: { kind: "generate", message: errMsg(err), truncation: outputTruncationOfError(err) },
-      });
-    } finally {
-      if (generateControllerRef.current === controller) {
-        generateControllerRef.current = null;
-        setGeneratingFor(null);
-      }
-    }
-  }, [projectName]);
+  // 从原文生成故事设定：首次上传后自动开始，或由「从原文生成」触发。状态在 store 里按项目记录，
+  // 生成途中离开概览再回来仍显示读取中，完成后就地填入。
+  const generating = useOverviewGenerateStore((s) => Boolean(s.generating[projectName]));
+  const generateError = useOverviewGenerateStore((s) => s.errors[projectName] ?? null);
+  const generate = useOverviewGenerateStore((s) => s.generate);
+  const runGenerate = useCallback(() => void generate(projectName), [generate, projectName]);
 
   const handleUploaded = useCallback(
     (result: SourceUploadResult) => {
       // 第一次放进整本源文时就地读取原文；只登记了逐集原文时不生成
-      if (result.wholeSourceFiles.length > 0) void runGenerate();
+      if (result.wholeSourceFiles.length > 0) runGenerate();
     },
     [runGenerate],
   );
 
-  // Agent 交接提示：本次会话内故事设定由空变为有内容时触发一次；只读态与广告项目不触发。
-  // 切项目时 trigger 归零，避免提示按 `<项目>:<trigger>` 去重时把上一个项目的计数当成新事件。
-  const [handoffTrigger, setHandoffTrigger] = useState(0);
-  const lastSeenRef = useRef<{ projectName: string; empty: boolean } | null>(null);
+  // 交接提示：本次会话内故事设定由空变为有内容时触发一次；只读态与广告项目不触发。
+  // 上一次看到的状态按项目记在 store 里：切项目时不把上一个项目的状态当成这个项目的变化，
+  // 离开概览期间后台生成填入的故事设定，回来时也算一次变化。
+  const observeStorySetting = useHandoffTipStore((s) => s.observe);
   useEffect(() => {
-    if (readOnly || isAd) {
-      lastSeenRef.current = null;
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- 切入只读态或广告项目时清零交接提示的 trigger，是有意的状态重置
-      setHandoffTrigger(0);
-      return;
-    }
-    if (!projectData) return;
-    const empty = !hasStorySetting(projectData.overview);
-    const last = lastSeenRef.current;
-    if (last && last.projectName !== projectName) setHandoffTrigger(0);
-    else if (last?.empty && !empty) setHandoffTrigger((k) => k + 1);
-    lastSeenRef.current = { projectName, empty };
-  }, [projectData, projectName, readOnly, isAd]);
+    if (readOnly || isAd || !projectData) return;
+    observeStorySetting(projectName, !hasStorySetting(projectData.overview));
+  }, [projectData, projectName, readOnly, isAd, observeStorySetting]);
 
   if (!projectData) {
     // 项目数据加载期间保留空容器，避免「居中提示 → 顶端内容」的位置跳动
@@ -161,10 +121,11 @@ export function OverviewCanvas({ projectName, projectData, readOnly = false }: O
               readOnly={readOnly}
               canGenerate={hasWholeSource || hasStorySetting(projectData.overview)}
               generating={generating}
-              generateError={generateError?.projectName === projectName ? generateError.error : null}
-              onGenerate={() => void runGenerate()}
+              generateError={generateError}
+              onGenerate={runGenerate}
             />
           )}
+          {!isAd && !readOnly ? <HandoffTip projectName={projectName} /> : null}
         </div>
       )}
       {uploadFiles !== null ? (
@@ -175,7 +136,6 @@ export function OverviewCanvas({ projectName, projectData, readOnly = false }: O
           onUploaded={handleUploaded}
         />
       ) : null}
-      {!readOnly ? <AgentHandoffHint triggerKey={handoffTrigger} storageScope={projectName} /> : null}
     </div>
   );
 }

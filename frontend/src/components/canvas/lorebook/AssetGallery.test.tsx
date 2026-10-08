@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { API } from "@/api";
+import { LeaveGuardProvider, useLeaveGuard } from "@/components/shared/edit-unit/LeaveGuard";
 import { useAppStore } from "@/stores/app-store";
 import { useProjectsStore } from "@/stores/projects-store";
 import { useTasksStore } from "@/stores/tasks-store";
@@ -256,7 +257,142 @@ describe("AssetGallery", () => {
       expect(remove).toHaveBeenCalledWith("demo", "scene", "书房");
       await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
     });
+
+    describe("确认删除并放弃其他未保存修改后", () => {
+      const discard = vi.fn();
+      function DirtyUnit() {
+        useLeaveGuard({ dirty: true, save: async () => true, discard });
+        return null;
+      }
+
+      beforeEach(() => {
+        discard.mockClear();
+        vi.spyOn(API, "previewProjectAssetDeletion").mockResolvedValue({
+          success: true,
+          dry_run: true,
+          name: "书房",
+          references: 0,
+          episodes: [],
+        });
+      });
+
+      async function confirmDeletion(user: ReturnType<typeof userEvent.setup>) {
+        render(
+          <LeaveGuardProvider>
+            <DirtyUnit />
+            <AssetGallery<Source>
+              projectName="demo"
+              assetType="scene"
+              title="场景"
+              assets={SCENES}
+              readOnly={false}
+              onGenerate={vi.fn()}
+              libraryPreview={libraryPreview}
+            />
+          </LeaveGuardProvider>,
+        );
+        await user.click(within(await openMenu(user, "书房")).getByRole("menuitem", { name: "删除" }));
+        const dialog = await screen.findByRole("alertdialog", { name: "删除场景「书房」？" });
+        await within(dialog).findByText("删除后无法恢复。");
+        await user.click(within(dialog).getByRole("button", { name: "删除" }));
+        return within(await screen.findByRole("alertdialog", { name: "有未保存的修改" }));
+      }
+
+      it("删除请求失败时修改原样保留", async () => {
+        const user = userEvent.setup();
+        vi.spyOn(API, "deleteProjectAsset").mockRejectedValue(new Error("网络中断"));
+        const leave = await confirmDeletion(user);
+
+        await user.click(leave.getByRole("button", { name: "放弃修改" }));
+
+        expect(await screen.findByRole("alert")).toHaveTextContent("网络中断");
+        expect(discard).not.toHaveBeenCalled();
+      });
+
+      it("询问期间资产变为占用：不删除，修改保留", async () => {
+        const user = userEvent.setup();
+        const remove = vi.spyOn(API, "deleteProjectAsset").mockResolvedValue({ success: true });
+        const leave = await confirmDeletion(user);
+
+        act(() => useTasksStore.setState({
+          tasks: [makeTask({ project_name: "demo", task_type: "scene", media_type: "image", resource_id: "书房", status: "running" })],
+        }));
+        await user.click(leave.getByRole("button", { name: "放弃修改" }));
+
+        await waitFor(() => expect(useAppStore.getState().toast?.text).toBe("资产图正在生成或修改，请等它结束后再操作"));
+        expect(remove).not.toHaveBeenCalled();
+        expect(discard).not.toHaveBeenCalled();
+      });
+
+      it("删除成功后丢弃修改", async () => {
+        const user = userEvent.setup();
+        vi.spyOn(API, "deleteProjectAsset").mockResolvedValue({ success: true });
+        const leave = await confirmDeletion(user);
+
+        await user.click(leave.getByRole("button", { name: "放弃修改" }));
+
+        await waitFor(() => expect(discard).toHaveBeenCalledTimes(1));
+        expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+      });
+    });
   });
+  describe("merging an asset", () => {
+    beforeEach(() => {
+      const project = { title: "demo", scenes: SCENES, episodes: [] } as unknown as ProjectData;
+      useProjectsStore.setState({ currentProjectName: "demo", currentProjectData: project });
+      vi.spyOn(API, "getProject").mockResolvedValue({ project, scripts: {} } as never);
+    });
+
+    afterEach(() => {
+      useProjectsStore.setState(useProjectsStore.getInitialState(), true);
+    });
+
+    it("blocks merging into an asset whose card has a write in flight and says why", async () => {
+      const user = userEvent.setup();
+      let finishUpload: (value: never) => void = () => {};
+      vi.spyOn(API, "uploadFile").mockReturnValue(new Promise((resolve) => (finishUpload = resolve)));
+      const merge = vi.spyOn(API, "mergeProjectAsset").mockResolvedValue({
+        success: true,
+        dry_run: true,
+        source: "庭院",
+        target: "书房",
+        as_derivative: false,
+        aliases_added: [],
+        derivative_created: null,
+        derivatives_moved: [],
+        derivatives_folded: [],
+        references: 0,
+        episodes: [],
+      });
+      renderGallery();
+
+      // 保留方「书房」的卡片上正在上传资产图
+      const target = screen.getByRole("article", { name: "书房" });
+      const file = new File(["sheet"], "scene.png", { type: "image/png" });
+      fireEvent.change(within(target).getByLabelText("上传资产图", { selector: "input" }), { target: { files: [file] } });
+
+      await user.click(within(await openMenu(user, "庭院")).getByRole("menuitem", { name: "并入…" }));
+      const dialog = await screen.findByRole("alertdialog", { name: "把「庭院」并入另一个资产" });
+      await user.click(within(dialog).getByRole("combobox", { name: "保留方" }));
+      await user.click(await screen.findByRole("option", { name: "书房" }));
+
+      await waitFor(() => expect(merge).toHaveBeenCalledWith("demo", "scene", "庭院", "书房", expect.objectContaining({ dryRun: true })));
+      const confirm = within(dialog).getByRole("button", { name: "并入" });
+      expect(await within(dialog).findByText("「书房」正在上传资产图、恢复版本或删除，完成后才能合并")).toBeInTheDocument();
+      expect(confirm).toBeDisabled();
+
+      await act(async () => finishUpload({ path: "x" } as never));
+      await waitFor(() => expect(confirm).toBeEnabled());
+
+      act(() => useTasksStore.setState({
+        tasks: [makeTask({ project_name: "demo", task_type: "scene", media_type: "image", resource_id: "书房", status: "running" })],
+      }));
+      expect(confirm).toBeDisabled();
+      expect(within(dialog).getByText("「书房」正在生成，生成结束后才能合并")).toBeInTheDocument();
+      expect(merge).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe("image viewer", () => {
     const version = (n: number, current: boolean) => ({
       version: n,

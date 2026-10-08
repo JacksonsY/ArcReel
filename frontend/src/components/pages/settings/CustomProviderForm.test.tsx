@@ -219,6 +219,28 @@ describe("CustomProviderForm", () => {
     expect(location.history.at(-1)).toBe("/app/settings?section=endpoints&endpoint=openai-chat&from=3");
   });
 
+  it("opens the market filtered to the media type of the model's endpoint", async () => {
+    const user = userEvent.setup();
+    const { location } = renderForm({
+      existing: provider([model(1, "gpt-image-1", "openai-images")]),
+      focusModelId: "gpt-image-1",
+    });
+
+    await user.click(await screen.findByRole("link", { name: "没有合适的端点？从市场获取" }));
+
+    expect(location.history.at(-1)).toBe("/app/settings?section=market&media=image");
+  });
+
+  it("opens the market unfiltered for a text model, since the market has no text filter", async () => {
+    const user = userEvent.setup();
+    const { location } = renderForm({ existing: provider([model(1, "gpt-4o")]), focusModelId: "gpt-4o" });
+    await screen.findByRole("link", { name: "在调用端点中打开" });
+
+    await user.click(screen.getByRole("link", { name: "没有合适的端点？从市场获取" }));
+
+    expect(location.history.at(-1)).toBe("/app/settings?section=market");
+  });
+
   it("asks before opening the endpoint while the provider has unsaved edits", async () => {
     const user = userEvent.setup();
     const { location } = renderForm({ existing: provider([model(1, "gpt-4o")]), focusModelId: "gpt-4o" });
@@ -246,5 +268,14 @@ describe("CustomProviderForm", () => {
 
     await waitFor(() => expect(onDeleted).toHaveBeenCalled());
     expect(API.deleteCustomProvider).toHaveBeenCalledWith(3);
+  });
+
+  it("sets the key and model IDs in monospace, and leaves the base URL proportional", () => {
+    renderForm();
+    fireEvent.click(screen.getByRole("button", { name: "手动添加模型" }));
+
+    expect(screen.getByLabelText("密钥")).toHaveClass("font-mono");
+    expect(screen.getByRole("textbox", { name: "模型 ID" })).toHaveClass("font-mono");
+    expect(screen.getByLabelText("接口地址").closest(".font-mono")).toBeNull();
   });
 });

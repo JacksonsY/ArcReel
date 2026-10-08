@@ -9,11 +9,14 @@ import { API } from "@/api";
 import { ApiRequestError } from "@/api/errors";
 import { LeaveGuardProvider } from "@/components/shared/edit-unit/LeaveGuard";
 import { useAppStore } from "@/stores/app-store";
+import { useAssistantStore } from "@/stores/assistant-store";
 import { useCostStore } from "@/stores/cost-store";
+import { useOverviewGenerateStore } from "@/stores/overview-generate-store";
 import { useProjectsStore } from "@/stores/projects-store";
 import type { CostEstimateResponse, ProjectData } from "@/types";
 
 import { OverviewCanvas } from "./OverviewCanvas";
+import { useHandoffTipStore } from "./useHandoffTip";
 
 function makeProjectData(overrides: Partial<ProjectData> = {}): ProjectData {
   return {
@@ -84,6 +87,7 @@ describe("OverviewCanvas", () => {
     useAppStore.setState(useAppStore.getInitialState(), true);
     useProjectsStore.setState(useProjectsStore.getInitialState(), true);
     useCostStore.setState(useCostStore.getInitialState(), true);
+    useOverviewGenerateStore.setState(useOverviewGenerateStore.getInitialState(), true);
     vi.restoreAllMocks();
     vi.spyOn(API, "getProject").mockResolvedValue({ project: makeProjectData(), scripts: {} });
   });
@@ -305,7 +309,7 @@ describe("OverviewCanvas", () => {
       within(await screen.findByRole("alertdialog")).getByRole("button", { name: "放弃修改并重新生成" }),
     );
 
-    expect(generate).toHaveBeenCalledWith("demo", expect.anything());
+    expect(generate).toHaveBeenCalledWith("demo");
     expect(screen.getByRole("status")).toHaveTextContent("正在读取原文…");
   });
 
@@ -324,6 +328,34 @@ describe("OverviewCanvas", () => {
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
   });
 
+  it("keeps reading the source after leaving the overview mid-generation and fills in the result on return", async () => {
+    const user = userEvent.setup();
+    let finishGenerate!: () => void;
+    vi.spyOn(API, "generateOverview").mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishGenerate = () => resolve({ success: true, overview: {} as never });
+        }),
+    );
+    const source = { whole_source_files: [{ source_file: "source/novel.txt" }] };
+    useProjectsStore.getState().setCurrentProject("demo", makeProjectData({ ...EMPTY_PROJECT, ...source }));
+    vi.spyOn(API, "getProject").mockResolvedValue({ project: makeProjectData(source), scripts: {} });
+    const first = render(withRouter(<StoreOverview />));
+
+    await user.click(screen.getByRole("button", { name: "从原文生成" }));
+    expect(screen.getByRole("status")).toHaveTextContent("正在读取原文…");
+    first.unmount();
+
+    // 离开期间服务端仍在生成：回到概览时接着显示读取中
+    render(withRouter(<StoreOverview />));
+    expect(screen.getByRole("status")).toHaveTextContent("正在读取原文…");
+
+    await act(async () => finishGenerate());
+
+    await waitFor(() => expect(screen.queryByText("正在读取原文…")).not.toBeInTheDocument());
+    expect(screen.getByRole("textbox", { name: "梗概" })).toHaveValue("summary");
+  });
+
   it("shows the way out when generating fails because the model output was truncated", async () => {
     const user = userEvent.setup();
     vi.spyOn(API, "generateOverview").mockRejectedValue(
@@ -340,7 +372,7 @@ describe("OverviewCanvas", () => {
     await user.click(screen.getByRole("button", { name: "从原文生成" }));
 
     const alert = await screen.findByRole("alert");
-    expect(within(alert).getByRole("button", { name: "去登记最大输出长度" })).toBeInTheDocument();
+    expect(within(alert).getByRole("link", { name: "去登记最大输出长度" })).toBeInTheDocument();
     // 失败后字段回来，可以手写或再试一次
     expect(screen.getByRole("textbox", { name: "梗概" })).toBeInTheDocument();
   });
@@ -359,6 +391,23 @@ describe("OverviewCanvas", () => {
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("故事设定已生成，但页面数据刷新失败，请刷新页面查看最新结果。");
     expect(alert).not.toHaveTextContent("生成失败");
+  });
+
+  it("drops the refresh warning once the project data loads again", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(API, "generateOverview").mockResolvedValue({ success: true, overview: {} as never });
+    vi.spyOn(API, "getProject").mockRejectedValue(new Error("offline"));
+    useProjectsStore
+      .getState()
+      .setCurrentProject("demo", makeProjectData({ ...EMPTY_PROJECT, whole_source_files: [{ source_file: "source/novel.txt" }] }));
+    render(withRouter(<StoreOverview />));
+
+    await user.click(screen.getByRole("button", { name: "从原文生成" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("页面数据刷新失败");
+
+    // 之后重新加载成功（如切走再回来），数据已带上生成结果，提示不再挂着
+    act(() => useProjectsStore.getState().setCurrentProject("demo", makeProjectData()));
+    expect(screen.queryByText(/页面数据刷新失败/)).not.toBeInTheDocument();
   });
 
   it("shows the read-only story setting as text without edit or generate entries", () => {
@@ -440,40 +489,104 @@ describe("OverviewCanvas", () => {
     });
   });
 
-  describe("agent handoff hint", () => {
-    it("opens the Agent panel once when the story setting goes from empty to filled", () => {
-      useAppStore.setState({ assistantPanelOpen: false });
-      // 提示按「项目:trigger」记入 sessionStorage 去重，用本条用例独有的项目名
+  describe("handoff tip", () => {
+    const TIP = "故事设定已提炼完成。接下来在右侧向 Agent 发送「开始制作」。";
+
+    /** 故事设定在本次会话内由空变为有内容。 */
+    function fillStorySetting(projectName = "demo") {
       const view = renderOverview({
-        projectName: "handoff-fill",
+        projectName,
         projectData: makeProjectData({ overview: undefined, whole_source_files: [{ source_file: "source/a.txt" }] }),
       });
-      view.rerender({ projectName: "handoff-fill", projectData: makeProjectData() });
+      view.rerender({ projectName, projectData: makeProjectData() });
+      return view;
+    }
 
-      expect(useAppStore.getState().assistantPanelOpen).toBe(true);
+    beforeEach(() => {
+      useHandoffTipStore.setState(useHandoffTipStore.getInitialState(), true);
+      useAssistantStore.setState(useAssistantStore.getInitialState(), true);
+    });
+
+    it("appears under the story setting once it goes from empty to filled, and stays after leaving the overview", () => {
+      const view = fillStorySetting();
+      expect(screen.getByText(TIP).closest("[role=status]")).not.toBeNull();
+
+      // 切到别的视图再回来（概览卸载后重新挂载），提示还在
+      view.unmount();
+      renderOverview();
+      expect(screen.getByText(TIP).closest("[role=status]")).not.toBeNull();
+    });
+
+    it("goes away for good once dismissed, including after a reload", async () => {
+      const user = userEvent.setup();
+      const view = fillStorySetting();
+      await user.click(screen.getByRole("button", { name: "知道了" }));
+      expect(screen.queryByText(TIP)).not.toBeInTheDocument();
+
+      // 刷新：内存里的待显示状态清空，同一项目的故事设定再次由空变为有内容也不再提示
+      view.unmount();
+      useHandoffTipStore.setState(useHandoffTipStore.getInitialState(), true);
+      fillStorySetting();
+      expect(screen.queryByText(TIP)).not.toBeInTheDocument();
+    });
+
+    it("goes away when the first message is sent to the agent in this project", () => {
+      const view = fillStorySetting();
+
+      act(() => useAssistantStore.setState({ currentProject: "other", sending: true }));
+      expect(screen.getByText(TIP)).toBeInTheDocument();
+
+      act(() => useAssistantStore.setState({ sending: false }));
+      act(() => useAssistantStore.setState({ currentProject: "demo", sending: true }));
+      expect(screen.queryByText(TIP)).not.toBeInTheDocument();
+
+      view.unmount();
+      useHandoffTipStore.setState(useHandoffTipStore.getInitialState(), true);
+      fillStorySetting();
+      expect(screen.queryByText(TIP)).not.toBeInTheDocument();
+    });
+
+    it("appears when the story setting was filled while the overview was away", () => {
+      // 生成在后台继续：离开概览时还是空的，回来时已有内容
+      const view = renderOverview({
+        projectData: makeProjectData({ overview: undefined, whole_source_files: [{ source_file: "source/a.txt" }] }),
+      });
+      view.unmount();
+      renderOverview();
+
+      expect(screen.getByText(TIP).closest("[role=status]")).not.toBeNull();
+    });
+
+    it("goes away when a message is sent to the agent from another view of this project", () => {
+      const view = fillStorySetting();
+      view.unmount();
+
+      act(() => useAssistantStore.setState({ currentProject: "demo", sending: true }));
+      renderOverview();
+
+      expect(screen.queryByText(TIP)).not.toBeInTheDocument();
+    });
+
+    it("does not appear once a message was sent to the agent in this project before the story setting filled in", () => {
+      act(() => useAssistantStore.setState({ currentProject: "demo", sending: true }));
+      fillStorySetting();
+
+      expect(screen.queryByText(TIP)).not.toBeInTheDocument();
     });
 
     it("does not fire when switching from an empty project to another project that already has a story setting", () => {
-      useAppStore.setState({ assistantPanelOpen: false });
       const view = renderOverview({ projectName: "project-a", projectData: makeProjectData(EMPTY_PROJECT) });
       view.rerender({ projectName: "project-b", projectData: makeProjectData() });
 
-      expect(useAppStore.getState().assistantPanelOpen).toBe(false);
+      expect(screen.queryByText(TIP)).not.toBeInTheDocument();
     });
 
-    it("does not fire or stay visible on a read-only project", () => {
-      useAppStore.setState({ assistantPanelOpen: false });
-      const view = renderOverview({ projectName: "real", projectData: makeProjectData(EMPTY_PROJECT) });
-      view.rerender({ projectName: "real", projectData: makeProjectData() });
-      expect(screen.getByText("准备就绪")).toBeInTheDocument();
-
-      useAppStore.setState({ assistantPanelOpen: false });
+    it("does not fire on a read-only project", () => {
+      const view = renderOverview({ projectName: "onboarding_demo", projectData: makeProjectData(EMPTY_PROJECT), readOnly: true });
       view.rerender({ projectName: "onboarding_demo", projectData: makeProjectData(), readOnly: true });
-      expect(screen.queryByText("准备就绪")).not.toBeInTheDocument();
 
-      // 途经只读演示项目再进入另一个真实项目，不会重放上一个项目的提示
-      view.rerender({ projectName: "project-b", projectData: makeProjectData() });
-      expect(useAppStore.getState().assistantPanelOpen).toBe(false);
+      expect(screen.queryByText(TIP)).not.toBeInTheDocument();
+      expect(useHandoffTipStore.getState().pending.size).toBe(0);
     });
   });
 

@@ -1,6 +1,7 @@
-import type { Locator, Page } from "@playwright/test";
+import type { Page } from "@playwright/test";
+import { RECORDED_ACCESS_TOKEN } from "../support/recorded.ts";
 import { defineRegionScenarios } from "../support/scenarios.ts";
-import { expect, type ApiOverrides } from "../support/test.ts";
+import { expect, test, type ApiOverrides } from "../support/test.ts";
 
 // Agent 面板消息区：滚动跟随与「跳到最新」、气泡与正文限宽、Markdown 代码块与宽表格、
 // 原地编辑与图片放大。会话是手写的压力数据：长文本、长链接、多轮对话。
@@ -163,11 +164,6 @@ async function withPanelWidth(page: Page, width: number) {
   await expect.poll(async () => (await agentPanel(page).boundingBox())?.width).toBeCloseTo(width, 0);
 }
 
-/** 弹层进场动画结束后再探测，避免 axe 量到半透明的中间态。只等弹层自身：页面上持续运行的指示动画不会结束。 */
-async function settleAnimations(dialog: Locator) {
-  await dialog.evaluate((el) => Promise.allSettled(el.getAnimations({ subtree: true }).map((a) => a.finished)));
-}
-
 defineRegionScenarios("Agent 消息区", [
   {
     name: "打开长会话时停在最新一条，不显示「跳到最新」",
@@ -254,7 +250,38 @@ defineRegionScenarios("Agent 消息区", [
       await thumbnail.click();
       const dialog = page.getByRole("dialog", { name: "图片附件 1" });
       await dialog.waitFor();
-      await settleAnimations(dialog);
     },
   },
 ]);
+
+// 代码块主体的高亮分块按需加载，到达时整块替换先渲染的占位。扣住分块，先聚焦占位里的
+// 代码块再放行，焦点要留在替换后的代码块上，而不是落回 body。
+test("代码块高亮分块晚于聚焦到达时，焦点留在代码块上", async ({ page, api }) => {
+  api.override(API);
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let delivered!: () => void;
+  const chunkDelivered = new Promise<void>((resolve) => {
+    delivered = resolve;
+  });
+  await page.route(/\/highlighted-body-[^/]*\.js$/, async (route) => {
+    await released;
+    await route.continue();
+    delivered();
+  });
+  await page.addInitScript((token) => localStorage.setItem("arcreel_auth_token", token), RECORDED_ACCESS_TOKEN);
+  await page.goto(EPISODE_PATH);
+
+  const code = page.getByRole("region", { name: "代码块" });
+  await code.focus();
+  await expect(code).toBeFocused();
+  const placeholder = await code.elementHandle();
+
+  release();
+  await chunkDelivered;
+  // 等占位节点被替换掉，再看焦点落在哪里
+  await expect.poll(() => placeholder?.evaluate((el) => el.isConnected)).toBe(false);
+  await expect(code).toBeFocused();
+});

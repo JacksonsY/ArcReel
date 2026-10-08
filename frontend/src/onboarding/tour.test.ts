@@ -103,6 +103,101 @@ describe("startTour", () => {
     target.remove();
   });
 
+  it("leaves the highlighted element's own ARIA state as it was, during the step and after", async () => {
+    // 高亮到的是带下拉菜单的触发器：driver 会写上 aria-haspopup="dialog" 等，离开时整组删掉
+    const trigger = document.createElement("button");
+    trigger.setAttribute("data-onboarding", ONBOARDING_ANCHORS.lobbyCreateProject);
+    trigger.setAttribute("aria-haspopup", "menu");
+    trigger.setAttribute("aria-expanded", "false");
+    document.body.appendChild(trigger);
+
+    const handle = startTour(
+      [
+        { anchor: ONBOARDING_ANCHORS.lobbyCreateProject, title: "入口", body: "在这里新建" },
+        { anchor: null, title: "收尾", body: "讲完了" },
+      ],
+      LABELS,
+      { onExit: vi.fn() },
+    );
+
+    await vi.waitFor(() => expect(trigger).toHaveAttribute("aria-haspopup", "menu"));
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    expect(trigger).not.toHaveAttribute("aria-controls");
+
+    click(".driver-popover-next-btn");
+    await vi.waitFor(() => expect(popover().querySelector(".driver-popover-title")?.textContent).toBe("收尾"));
+    await vi.waitFor(() => expect(trigger).toHaveAttribute("aria-haspopup", "menu"));
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    // 居中气泡顶着的占位元素是空 div，同样不带这组属性
+    await vi.waitFor(() => expect(document.getElementById("driver-dummy-element")).not.toHaveAttribute("aria-expanded"));
+
+    handle.dispose();
+    expect(trigger).toHaveAttribute("aria-haspopup", "menu");
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    trigger.remove();
+  });
+
+  it("moves the highlight along when content rendered above pushes the anchor down", async () => {
+    // 回到大厅时问候区晚于「示例项目」区块渲染：锚点被推下去，高亮框要跟过去
+    const target = document.createElement("div");
+    target.setAttribute("data-onboarding", ONBOARDING_ANCHORS.lobbyDemoCard);
+    document.body.appendChild(target);
+    let top = 100;
+    vi.spyOn(target, "getBoundingClientRect").mockImplementation(() => new DOMRect(40, top, 300, 200));
+    const stage = () => document.querySelector(".driver-overlay path")?.getAttribute("d") ?? "";
+    // 关掉 driver 的转场，高亮框第一帧就落定；转场中的位移本来就逐帧跟着锚点走
+    vi.stubGlobal("matchMedia", (query: string) => ({ matches: query.includes("reduce") }) as MediaQueryList);
+
+    const handle = startTour([{ anchor: ONBOARDING_ANCHORS.lobbyDemoCard, title: "演示卡", body: "长这样" }], LABELS, {
+      onExit: vi.fn(),
+    });
+    // 高亮框的上沿 = 锚点上沿 - stagePadding(8)
+    await vi.waitFor(() => expect(stage()).toContain(",92 h"));
+
+    top = 166;
+    document.body.prepend(document.createElement("h1"));
+    await vi.waitFor(() => expect(stage()).toContain(",158 h"));
+
+    handle.dispose();
+    target.remove();
+    vi.unstubAllGlobals();
+  });
+
+  it("re-places the popover when the anchor is pushed down before the highlight settles", async () => {
+    vi.stubGlobal("matchMedia", (query: string) => ({ matches: query.includes("reduce") }) as MediaQueryList);
+    const handle = startTour(
+      [
+        { anchor: null, title: "欢迎", body: "开场" },
+        { anchor: ONBOARDING_ANCHORS.lobbyDemoCard, title: "演示卡", body: "长这样" },
+      ],
+      LABELS,
+      { onExit: vi.fn() },
+    );
+    const stage = () => document.querySelector(".driver-overlay path")?.getAttribute("d") ?? "";
+    // 遮罩在第一步挂上，之后的步骤不再插入它
+    await vi.waitFor(() => expect(stage()).not.toBe(""));
+    click(".driver-popover-next-btn");
+
+    const target = document.createElement("div");
+    target.setAttribute("data-onboarding", ONBOARDING_ANCHORS.lobbyDemoCard);
+    let top = 100;
+    vi.spyOn(target, "getBoundingClientRect").mockImplementation(() => new DOMRect(40, top, 300, 200));
+    // 锚点挂载后 driver 立即按当时的位置摆好气泡，下一帧才落定高亮框；问候区恰好在这之间渲染
+    document.body.appendChild(target);
+    await Promise.resolve();
+    expect(popover().querySelector(".driver-popover-title")?.textContent).toBe("演示卡");
+    top = 166;
+    document.body.prepend(document.createElement("h1"));
+
+    await vi.waitFor(() => expect(stage()).toContain(",158 h"));
+    // 气泡在锚点下方，driver 写的是到视口底边的距离：视口高 -（锚点下沿 + stagePadding 8 + 默认间距 10）
+    await vi.waitFor(() => expect(popover()).toHaveStyle({ bottom: `${window.innerHeight - (166 + 200 + 18)}px` }));
+
+    handle.dispose();
+    target.remove();
+    vi.unstubAllGlobals();
+  });
+
   it("falls back to a centered popover when the anchor is missing, and warns", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const handle = startTour(
@@ -190,6 +285,22 @@ describe("startTour", () => {
 
     expect(onExit).toHaveBeenCalledTimes(1);
     expect(document.querySelector(".driver-popover")).toBeNull();
+  });
+
+  it("hands focus back to where it was before the tour once the tour exits", () => {
+    // 引导启动时一个对话框开着、焦点在它的输入框里：退出后焦点回到这里，而不是落到 body
+    const input = document.createElement("input");
+    document.body.appendChild(input);
+    input.focus();
+
+    startTour(TWO_STEPS, LABELS, { onExit: vi.fn() });
+    // 浏览器里 driver 把焦点移进气泡；jsdom 没有布局，driver 判定按钮不可见而不移，这里代它移
+    popover().querySelector<HTMLElement>(".driver-popover-next-btn")?.focus();
+    click(".driver-popover-next-btn");
+    click(".driver-popover-close-btn");
+
+    expect(input).toHaveFocus();
+    input.remove();
   });
 
   it("does not report an exit when the caller disposes the tour", () => {
@@ -283,8 +394,8 @@ describe("startTour", () => {
 
   describe("peripheral isolation", () => {
     // driver.js 只挡 pointer-events + Tab 键，屏幕阅读器的虚拟光标仍能读到底层界面；
-    // body 的既有子节点（#app-root，以及 ModalShell/CreateProjectModal 这类直接
-    // createPortal 到 body、与 #app-root 是兄弟关系的对话框）打 inert 摘出无障碍树，
+    // body 的既有子节点（#app-root，以及 Dialog、Sheet 这类经 Portal 挂到 body、
+    // 与 #app-root 是兄弟关系的弹层）打 inert 摘出无障碍树，
     // 才是真正的「全程只读」。
     function withAppRoot(): HTMLElement {
       const appRoot = document.createElement("div");
@@ -336,7 +447,7 @@ describe("startTour", () => {
 
     it("also inerts a dialog already portaled to body when the tour starts, and clears it on dispose", () => {
       const appRoot = withAppRoot();
-      // 模拟 ModalShell/CreateProjectModal 用 createPortal 挂到 body 的对话框——
+      // 模拟经 Portal 挂到 body 的对话框——
       // 是 #app-root 的兄弟节点，不在其子树内。
       const modal = document.createElement("div");
       document.body.appendChild(modal);

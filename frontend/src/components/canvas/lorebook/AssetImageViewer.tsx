@@ -36,7 +36,7 @@ export interface AssetImageViewerProps {
   /** 资产图被占用的资产：任务在跑，或卡片上有上传、版本恢复、删除在途。 */
   busyNames: ReadonlySet<string>;
   readOnly: boolean;
-  onRestoreVersion?: () => Promise<void> | void;
+  onRestoreVersion?: () => Promise<unknown> | void;
 }
 
 type VersionsState =
@@ -278,7 +278,7 @@ export function AssetImageViewer({
             <AlertDialogHeader>
               <AlertDialogTitle>{t("assets:viewer_restore_title", { version: confirming ?? 0 })}</AlertDialogTitle>
             </AlertDialogHeader>
-            <AlertDialogBody>
+            <AlertDialogBody tabIndex={0} role="region" aria-label={t("assets:viewer_restore_title", { version: confirming ?? 0 })}>
               <div className="flex flex-col gap-3">
                 <AlertDialogDescription>
                   {t("assets:viewer_restore_description", { name: asset.name, version: confirming ?? 0 })}

@@ -20,6 +20,7 @@ from lib.episode.episode_paths import SCRIPT_PLAN_FILENAMES, episode_drafts_dir,
 from lib.generation.video_request_facts import VideoRequestFactsError
 from lib.infra.async_thread import run_sync_transaction
 from lib.infra.json_io import atomic_write_json, load_json_or_none
+from lib.project.project_activity import record_project_activity
 from lib.project.project_manager import ProjectManager, ScriptWriteConflict
 from lib.script import script_review
 from lib.script.draft_quarantine import (
@@ -1339,6 +1340,7 @@ class DraftWorkflow:
                 meta=meta,
             ),
         )
+        record_project_activity(self.ctx.project_path)
         return self._read(episode, resolved)
 
     async def patch(
@@ -1500,8 +1502,7 @@ class DraftWorkflow:
                     "revision_conflict",
                     f"draft revision changed: expected {base_revision}, actual {actual_revision}",
                 )
-            discarded = path.exists()
-            path.unlink(missing_ok=True)
+            discarded = clear_quarantine(self.ctx.project_path, episode, resolved)
         return {"episode": episode, "doc_type": doc_type, "discarded": discarded}
 
 

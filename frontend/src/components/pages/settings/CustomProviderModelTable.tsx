@@ -353,6 +353,7 @@ function ModelFields({ row, protocol, providerId, onUpdate, onRemove }: ModelFie
     <div className="flex flex-col gap-3">
       <FieldRow label={t("model_id_label")} htmlFor={`${idPrefix}-id`}>
         <Input
+          mono
           id={`${idPrefix}-id`}
           value={row.model_id}
           autoComplete="off"
@@ -396,7 +397,7 @@ function ModelFields({ row, protocol, providerId, onUpdate, onRemove }: ModelFie
               {t("cp_open_endpoint")}
             </Link>
           )}
-          <Link href={marketSettingsPath()} className={buttonVariants({ variant: "link", size: "sm" })}>
+          <Link href={marketSettingsPath("browse", { media })} className={buttonVariants({ variant: "link", size: "sm" })}>
             <Store aria-hidden data-icon="inline-start" />
             {t("cp_endpoint_from_market")}
           </Link>

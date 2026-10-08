@@ -143,13 +143,6 @@ async function detailReady(page: Page) {
   await page.getByRole("region", { name: "使用这个端点的模型" }).waitFor();
 }
 
-async function animationsSettled(page: Page, role: "dialog" | "alertdialog" | "menu") {
-  // 等进场过渡结束再探测：淡入途中的半透明文字会被 axe 判为对比度不足
-  await page
-    .getByRole(role)
-    .evaluate((el) => Promise.all(el.getAnimations({ subtree: true }).map((a) => a.finished)));
-}
-
 defineRegionScenarios("调用端点", [
   {
     name: "我的端点详情：模型多、定义长时正文在详情栏里滚动，底部保存栏始终可见",
@@ -166,6 +159,19 @@ defineRegionScenarios("调用端点", [
       await expect(save).toBeEnabled();
     },
     screenshot: { name: "endpoints-detail", target: (page) => page.getByRole("main") },
+  },
+  {
+    name: "内置端点详情：页头并排「复制为我的端点」与主按钮「新建供应商并使用」，都在视口内",
+    path: `${ENDPOINTS_PATH}&endpoint=newapi-video`,
+    ready: async (page) => {
+      await page.getByRole("heading", { name: "NewAPI Video" }).waitFor();
+      await page.getByRole("region", { name: "使用这个端点的模型" }).waitFor();
+    },
+    act: async (page) => {
+      await expect(page.getByRole("button", { name: "复制为我的端点" })).toBeInViewport({ ratio: 1 });
+      await expect(page.getByRole("button", { name: "新建供应商并使用" })).toBeInViewport({ ratio: 1 });
+    },
+    screenshot: { name: "endpoints-builtin-detail", target: (page) => page.getByRole("main") },
   },
   {
     name: "自定义端点多且名称长：二级栏滚动到底，「新建端点」在视口内",
@@ -188,7 +194,6 @@ defineRegionScenarios("调用端点", [
       const menu = page.getByRole("menu");
       await expect(menu).toBeInViewport({ ratio: 1 });
       await expect(menu.getByRole("menuitem", { name: "删除端点" })).toBeInViewport({ ratio: 1 });
-      await animationsSettled(page, "menu");
     },
   },
   {
@@ -202,7 +207,6 @@ defineRegionScenarios("调用端点", [
       const dialog = page.getByRole("alertdialog");
       await expect(dialog.getByRole("button", { name: "取消" })).toBeFocused();
       await expect(dialog.getByRole("button", { name: "删除" })).toBeInViewport({ ratio: 1 });
-      await animationsSettled(page, "alertdialog");
     },
     screenshot: { name: "endpoints-delete-dialog", target: (page) => page.getByRole("alertdialog") },
   },
@@ -218,7 +222,6 @@ defineRegionScenarios("调用端点", [
       const dialog = page.getByRole("dialog");
       await expect(dialog).toBeInViewport({ ratio: 1 });
       await expect(dialog.getByRole("button", { name: "取消" })).toBeInViewport({ ratio: 1 });
-      await animationsSettled(page, "dialog");
     },
     screenshot: { name: "endpoints-import-dialog", target: (page) => page.getByRole("dialog") },
   },

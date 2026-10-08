@@ -17,6 +17,8 @@ paths:
 
 占用态不只来自队列任务：卡片自身发出的在途写请求（保存中、上传中、改名中）由组件本地 state 承载，`isResourceBusy` 读不到它们，本地 state 同样参与这三项检查。
 
+确认框打开后占用发生变化时，一键破坏性确认（删除、合并、改名的确认按钮）实时禁用；输入表单保持可编辑，由提交时的复核说明原因。
+
 ### 新增入队类 API 方法时，把方法名登记进 `frontend/eslint.config.js` 的 `RESTRICT_ENQUEUE`
 
 生成类入队统一经 `frontend/src/actions/` 的动作函数，由它们封装 API 调用、乐观标记占用与去重提示；组件直接调用入队类 API 会漏掉占用标记，用户可以对同一资源重复入队。ESLint 的 `no-restricted-syntax` 只按 `RESTRICT_ENQUEUE` 中登记的方法名拦截直接调用，未登记的新方法不受拦截。
@@ -39,7 +41,7 @@ paths:
 
 `frontend/src/components/ui/` 只存放用 shadcn CLI 安装的原语（`components.json` 的 `style` 为 `base-nova`，底层是 Base UI）。只要组件知道业务类型、调用 API 或读写 store，就放进使用它的业务目录；多个区域共用的放进 `components/shared/`。knip 对 `src/components/ui/*.tsx` 的未使用导出豁免，就是按「这里全是成套导出的原语」设计的；业务组件混进来后，它真正未使用的导出也会被一起放过。
 
-`components/legacy/` 存放等待替换的自研旧原语（`GlassModal`、`ConfirmDialog`、`FloatingPopover`、旧按钮等），干净交付时连同测试一起删除。已重做区域不再引用 `components/legacy/`；其他位置新写弹层、菜单、按钮时直接使用 `components/ui/` 的原语。
+弹层、菜单与按钮一律使用 `components/ui/` 的原语，不另写焦点陷阱、Esc 关闭或层级工具：焦点与关闭行为由 Base UI 负责，层级用 z-index token（见「层级只用 z-index token」）。
 
 ### 原语按需安装：首次用到的改动执行 `pnpm exec shadcn add`，不使用 `--overwrite`
 
@@ -77,13 +79,35 @@ Dependabot 只升级 npm 包，不会重新生成 `components/ui/*.tsx`。`@base
 
 画布里直接编辑的正文字段（如故事设定）用 `Textarea` 与 `Input` 的 `variant="plain"`：静止时没有边框与底色，悬停或聚焦时显出边框。长页面里的正文字段写 `max-h-none`，随内容撑高，由页面滚动，不在框内再嵌套滚动。
 
+### 代码类输入框用 `Input` 与 `Textarea` 的 `mono`，不手写等宽字体
+
+`mono` 只管字体，`variant` 只管外观，两者可以同时使用。`InputGroupInput` 与 `InputGroupTextarea` 透传 `mono`。不要在输入框或它的外层元素上写 `font-mono`：外层的字体经继承进入输入框，`@shadcn/lint` 查不到，规范也就无从核对。
+
+适用 `mono` 的输入框：
+
+- JSON、代码与请求体编辑区：端点的 JSON 视图、请求体模板、导入时粘贴的定义、测试时粘贴的响应、Agent 记忆的 Markdown 原文。
+- 模型 ID。
+- 令牌：API Key、密钥这类凭据输入框。
+- 请求路径与模板：端点的请求、查询、取件地址模板，请求头名称与内容，变量名，取值路径，状态值。
+
+保持比例字体的输入框：
+
+- 接口地址（URL），如供应商与端点的默认接口地址、代理地址。不需要拼写检查的值写 `spellCheck={false}`，不用换字体来表达。
+- 名称、版本、提示词等正文。登录密码不是令牌，同样保持比例字体。
+
 ### 带候选的文本输入：只能选候选项用 Combobox，允许填写候选之外的值用 Base UI Autocomplete
 
 Base UI 的 Combobox 只接受候选项，不能提交候选之外的文字；模型 ID 这类网关列表常常不全、必须允许自由填写的字段，用 `@base-ui/react/autocomplete`。shadcn 的 base-nova registry 没有 Autocomplete，参考 `components/agent/ModelIdField` 的写法：输入框用 `components/ui/input-group`，弹层表面沿用 `bg-popover`、`shadow-overlay` 与 `z-overlay`。
 
-### 区域重做完成后，把目录登记进 `eslint.config.js` 的 `REWORKED_FILES`
+### 样式与布局守卫对全部源码生效，放宽在 `eslint.config.js` 中逐条登记
 
-`@shadcn/lint` 的样式规则与滚动、响应式守卫（禁止视口高度、原语之外的 `fixed inset-0` 与读写 `scrollHeight`、业务组件的视口断点前缀）只对 `REWORKED_FILES` 中的 glob 生效。重做某个区域的改动把该区域的目录加进列表，并让这些文件零报告；交付结束时，列表替换为 `src/**`。
+`frontend/src/` 下除测试文件以外的源码都受以下 ESLint 规则约束：
+
+- `@shadcn/lint` 的样式规则。
+- 滚动与响应式守卫：禁止视口高度、原语之外的 `fixed inset-0` 与读写 `scrollHeight`、业务组件的视口断点前缀。
+- 类名守卫（`SOURCE_CLASS_GUARDS`）：`motion-safe:` 与 `motion-reduce:` 前缀、未定位的滚动容器、滚动条样式。
+
+`components/ui/` 的原语关闭 `no-restyle`、`no-arbitrary-values`、`require-static-classes` 三条样式规则，并放过 `fixed inset-0`、`scrollHeight` 与视口断点。flat config 对同一文件匹配到的 `no-restricted-syntax` 整体替换选项，豁免块因此用 `restrictSyntax(要放过的约束)` 列出其余全部约束，不另起只写一条约束的配置块，否则先声明的约束会被静默摘掉。改动这些配置块后运行 `src/lint-class-guards.test.ts`，它按配置块逐一核对各条约束仍然生效。
 
 需要放宽时，在 PR 描述中逐条列出，由审查判断：
 
@@ -94,11 +118,9 @@ Base UI 的 Combobox 只接受候选项，不能提交候选之外的文字；�
 
 ### 颜色只用 `index.css` 的语义 token，深浅用透明度修饰表达
 
-颜色 token 沿用 shadcn 命名（`primary`、`destructive`、`border`、`input`、`muted-foreground` 等），另有状态色 `good`、`warn`、文字中间档 `subtle-foreground` 和每集的身份色 `episode`。`episode` 的色相按集 ID 取：在元素上用内联样式写入 `--episode-hue`（取值用 `components/canvas/episodes/episodes-view-model.ts` 的 `episodeHue`），元素及其子孙用 `bg-episode`、`text-episode`、`border-episode` 取这一集的颜色。剪辑视图轨道上的视频单元色 `unit-clip`、`unit-narration` 用同样的写法，色相变量是 `--unit-hue`（取值用 `components/canvas/edit/timeline-view.ts` 的 `unitHue`）。浅底、描边、选中态写成基色加透明度修饰（`bg-primary/15`、`border-border/50`），不为某种深浅另设变体 token；变体 token 会让同一语义出现多个近似色，旧色板中的变体色已按这一原则删除。危险操作用 `destructive`，琥珀色 `warn` 只表示警告与过期。内联样式和 CSS 引用 `:root` 中的原始变量（`var(--primary)`），需要透明度时写 `color-mix(in oklab, var(--primary) 15%, transparent)`。
+颜色 token 沿用 shadcn 命名（`primary`、`destructive`、`border`、`input`、`muted-foreground` 等），另有状态色 `good`、`warn`、文字中间档 `subtle-foreground` 和每集的身份色 `episode`。`episode` 的色相按集 ID 取：在元素上用内联样式写入 `--episode-hue`（取值用 `components/canvas/episodes/episodes-view-model.ts` 的 `episodeHue`），元素及其子孙用 `bg-episode`、`text-episode`、`border-episode` 取这一集的颜色。剪辑视图轨道上的视频单元色 `unit-clip`、`unit-narration` 用同样的写法，色相变量是 `--unit-hue`（取值用 `components/canvas/edit/timeline-view.ts` 的 `unitHue`）。剧本里的 @ 提及与说话人按资产类型着色，用 `asset-product`、`asset-character`、`asset-scene`、`asset-prop`，解析不到的提及用 `destructive`；配色经 `components/canvas/reference/asset-colors.ts` 的 `assetColor` 取用。浅底、描边、选中态写成基色加透明度修饰（`bg-primary/15`、`border-border/50`），不为某种深浅另设变体 token；变体 token 会让同一语义出现多个近似色，旧色板中的变体色已按这一原则删除。危险操作用 `destructive`，琥珀色 `warn` 只表示警告与过期。内联样式和 CSS 引用 `:root` 中的原始变量（`var(--primary)`），需要透明度时写 `color-mix(in oklab, var(--primary) 15%, transparent)`。
 
 文字只分三档：`foreground`、`subtle-foreground`、`muted-foreground`。正文不在 `muted-foreground` 上再叠加透明度或 `opacity`：它在页面底色上的对比度是 5.7:1，再降低就达不到 WCAG AA 要求的 4.5:1。
-
-旧 token 名已由 `frontend/scripts/token-codemod.ts` 一次改完。合并仍在使用旧 token 名的分支后，对这些文件重跑脚本，用法见脚本头部注释。
 
 ## 弹层与提示
 
@@ -122,7 +144,7 @@ AlertDialog 打开时焦点落在「取消」上，误按 Enter 不会执行操�
 
 ### 全局提示统一用 `useAppStore` 的 `pushToast`
 
-提示由 `ToastOverlay` 转交 `components/ui/toast` 的 Base UI 队列显示，位置在顶部居中，同时最多显示 3 条，5 秒后自动消失，指针悬停或键盘聚焦时暂停计时。错误提示由读屏立即播报。不要另建提示组件，也不要直接调用 `components/ui/toast` 的 `toast.add`。提示、工作区通知与持久告警的分流规则见 `frontend/src/stores/app-store.ts` 中 `pushToast` 的说明。
+提示由 `ToastOverlay` 转交 `components/ui/toast` 的 Base UI 队列显示。`ToastOverlay` 订阅 store 的每次写入，同一批次里连发的几条按到达顺序都会显示。位置在顶部居中，同时最多显示 3 条，5 秒后自动消失，指针悬停或键盘聚焦时暂停计时。错误提示由读屏立即播报。不要另建提示组件，也不要直接调用 `components/ui/toast` 的 `toast.add`。提示、工作区通知与持久告警的分流规则见 `frontend/src/stores/app-store.ts` 中 `pushToast` 的说明。
 
 ### Sheet、Popover、DropdownMenu 的本仓库用法
 
@@ -151,7 +173,7 @@ AlertDialog 打开时焦点落在「取消」上，误按 Enter 不会执行操�
 
 尺寸用 `size`：`xs`、`sm`、`default`、`lg`，只有图标时用 `icon`、`icon-xs`、`icon-sm`、`icon-lg`。按钮内的图标加 `data-icon="inline-start"` 或 `data-icon="inline-end"`，不写尺寸 class。`Button` 没有 loading 属性；加载时禁用按钮，并把前置图标换成带 `animate-spin` 的 `Loader2`。
 
-`components/legacy/` 的 `PrimaryButton`、`SecondaryButton`、`ModalCloseButton`，以及 `.arc-btn-primary` 与 `.arc-btn-secondary`，已改为与 `Button` 外观一致的过渡封装，只供未重做的区域使用，新代码不再引用。
+整行条目（列表行、集目录行）、缩略图触发器与拖放区不是操作按钮，用原生 `<button>` 配 `focus-ring`：换成 `Button` 要在调用处改写它的样式，`no-restyle` 不允许。外观像按钮的导航入口用 `Link` 套 `buttonVariants`，不用 `Button` 调用 `navigate`：读屏按链接播报，也能在新标签页打开。
 
 ## 图表
 
@@ -167,7 +189,7 @@ AlertDialog 打开时焦点落在「取消」上，误按 Enter 不会执行操�
 
 ### 减少动态效果由 `index.css` 的全局规则统一处理，组件不单独适配
 
-开启「减少动态效果」时，全局规则把 tw-animate-css 的位移、缩放、旋转与模糊归零，过渡只保留透明度与颜色属性，其他 keyframes 动画（包括 `animate-spin`、`animate-breath`）直接停在终态。组件不需要再写 `motion-safe:` 或 `motion-reduce:`。新增带位移或缩放的动效时，在减少动态效果下确认它只剩淡入淡出。
+开启「减少动态效果」时，全局规则把 tw-animate-css 的位移、缩放、旋转与模糊归零，过渡只保留透明度与颜色属性，其他 keyframes 动画（包括 `animate-spin`、`animate-breath`）直接停在终态。组件不写 `motion-safe:` 或 `motion-reduce:`，由 lint 守卫。新增带位移或缩放的动效时，在减少动态效果下确认它只剩淡入淡出。
 
 ## 页面外壳与滚动
 
@@ -202,7 +224,7 @@ Agent 面板是名为 `agent` 的尺寸容器，面板内 `Textarea` 的默认�
 - **用户动作后显式回到底部。** 发送消息、提交回答这类「接下来要看回复」的动作，先调用 `MessageFlowHandle.scrollToEnd()`，它同时恢复跟随。切换会话以会话 id 作 `key` 重新挂载，新会话从底部开始。
 - **显示层整理在纯函数里。** 两条用户消息之间连续的 assistant turn 合成一轮、跳过没有可见内容的 turn，都在 `display-items.ts` 的 `buildDisplayItems` 中完成并有单元测试；渲染组件不再自行合并或过滤。
 - **按类型分发。** `MessageRow` 按 turn 类型分发：用户消息是靠右的 `Bubble`（`tinted`，宽度上限 85%），Agent 正文不加气泡、限宽 40em，系统事件逐块渲染；不显示「你」「Agent」角色眉题。块级渲染统一经 `ContentBlockRenderer`。操作行占住固定行高，悬停或焦点进入所在消息时才显示。
-- **按写入点的标记显示，不嗅探文本。** 压缩续接摘要（`compact_summary`）显示为「上下文已压缩」分隔线，缺锚点子代理的推断终态（`subagent_outcome`）挂到合成卡片上，都在 `utils/entry-projection` 里由条目子类型投影，渲染组件不按英文前缀识别。Agent 失败卡片的结论由故障观测的 `summary.key` 本地化（`agent_failure_conclusion_<key>`），不认识的 key 回落到按阶段的通用结论；原始类型、状态、消息与载荷只放在「详情」里。
+- **按写入点的标记显示，不嗅探文本。** 压缩续接摘要（`compact_summary`）显示为「上下文已压缩」分隔线，缺锚点子代理的推断终态（`subagent_outcome`）挂到合成卡片上，都在 `utils/entry-projection` 里由条目子类型投影，渲染组件不按英文前缀识别。Agent 失败卡片的结论由故障观测的 `summary.key` 本地化（`agent_failure_conclusion_<key>`），不认识的 key 回落到按阶段的通用结论；原始类型、状态、消息与载荷只放在「详情」里。失败卡片只为查看期间新到达的失败播报（`role="alert"`），历史边界是 store 的 `historySeq`；打开会话时已有的失败照常显示，不播报。
 - **工序显示为单行。** 工具调用、子智能体、Skill 与后台任务都用 `chat/WorkRow`：图标、本地化名称、一句摘要、状态，有详情时整行折叠，展开后的长文本由 `WorkDetail` 截断并给「显示全部」，不做内层滚动。显示名与摘要在 `work-label.ts` 生成；新增 ArcReel MCP 工具时，除了 `tool_name_<id>` 显示名，还要在 `arcreel-tool-summaries.ts` 登记摘要格式，`tests/unit/test_frontend_mcp_tool_i18n.py` 校验两者都没有缺漏。摘要里的集 ID、剧本文件名与条目 ID 换成集名与集内编号，不写剪辑时间线 ID 这类不透明标识。
 
 Markdown 正文（`StreamMarkdown`）里的代码块与表格放不下时横向滚动，由它的 rehype 插件统一标成可用键盘聚焦的区域，调用处不需要另外处理。
@@ -212,14 +234,14 @@ Markdown 正文（`StreamMarkdown`）里的代码块与表格放不下时横向�
 消息区下方自上而下是待办进度行、错误提示与输入框（`AgentComposer`）。改动输入区时遵守三条：
 
 - **提问不另开弹层。** Agent 提问时 `AgentQuestionnaire` 占用输入框的位置，输入框隐藏但保持挂载，预填的输入不会丢失。问卷高度上限是面板高度的 70%（`70cqh`），头部与按钮固定，只有题目区滚动；待办清单展开后继续压缩题目区，不把按钮挤出面板。
-- **附件与命令留在输入框里。** 上下文与图片附件放在 `InputGroup` 的顶部插槽，斜杠命令菜单是锚定在输入框上的 `Popover` + `Command`，焦点留在输入框，用 `aria-activedescendant` 指向当前项。
+- **附件与命令留在输入框里。** 图片附件放在 `InputGroup` 的顶部插槽，斜杠命令菜单是锚定在输入框上的 `Popover` + `Command`，焦点留在输入框，用 `aria-activedescendant` 指向当前项。
 - **会话历史替换消息区。** 顶栏「会话历史」开关打开后，会话列表占用消息区的位置；发送消息、提交回答、切换或新建会话都会收起它。删除会话经 `AlertDialog` 确认。
 
 ### 滚动只发生在外壳指定的容器里，文档本身不滚动
 
-外壳根节点是 `relative h-dvh overflow-hidden`，滚动只发生在侧栏、外壳主体（限宽与铺满档）和全出血区段的各栏。e2e 区域场景在全部验收视口上运行溢出探针，文档出现滚动，或内容被裁切且滚动不到，场景就会失败。新写或改动滚动区域时遵守四条：
+外壳根节点是 `relative h-dvh overflow-hidden`，滚动只发生在侧栏、外壳主体（限宽与铺满档）和全出血区段的各栏。e2e 区域场景在全部验收视口上运行溢出探针，文档出现纵向或横向滚动、内容被裁切且滚动不到，或纵向滚动区被撑出横向滚动，场景就会失败。新写或改动滚动区域时遵守四条：
 
-- **滚动容器是定位元素。** 写 `overflow-y-auto` 的元素同时写 `relative`。`sr-only` 等绝对定位的子元素以最近的定位祖先为包含块；滚动容器不是定位元素时，这些子元素会按自己在滚动内容里的位置撑高外层，造成文档滚动。
+- **滚动容器是定位元素。** 写 `overflow-y-auto` 的元素同时写 `relative`。`sr-only` 等绝对定位的子元素以最近的定位祖先为包含块；滚动容器不是定位元素时，这些子元素会按自己在滚动内容里的位置撑高外层，造成文档滚动。由 lint 守卫：类名字符串里有 `overflow-auto`、`overflow-scroll` 及其 `-x-`、`-y-` 形式时，同一个字符串里必须有 `relative`（已是 `absolute`、`fixed`、`sticky` 的除外）。守卫按单个字符串判断，定位类不要拆到 `cn()` 的另一个参数里。
 - **高度沿 flex 链传下来。** 从外壳到滚动容器之间的每一层 flex 子项写 `min-h-0`（横向是 `min-w-0`），否则 flex 子项的最小高度等于内容高度，滚动容器不会出现滚动，而是被内容撑开。
 - **不用视口高度定高。** 不写 `h-screen`、`max-h-screen`、`vh` 单位，也不用 `sticky` 加 `max-h-screen` 模拟独立滚动的栏。全出血区段的根节点写 `flex min-h-0 flex-1`，各栏写 `overflow-y-auto`。
 - **主体滚动区预留滚动条槽位。** 外壳主体已写 `[scrollbar-gutter:stable]`，内容变长出现滚动条时不会横向跳动；全出血区段内会随内容出现滚动条的主栏同样写上。
@@ -263,11 +285,13 @@ Markdown 正文（`StreamMarkdown`）里的代码块与表格放不下时横向�
 - **单行文字**（名称、路径、模型 ID）：用 `components/shared/TruncatedText`。被截断时可以用键盘聚焦，悬停或聚焦时显示全文；没有截断时不进入 Tab 顺序。放进 flex 或表格单元格时，父级需要允许收缩（`min-w-0`）。不用 `title` 属性代替，键盘用户看不到它。放在按钮等可聚焦元素里时传 `focusable={false}`，避免出现嵌套的可聚焦元素；全文由外层元素的可访问名称提供。
 - **带编号的名称**（分镜号加集名）：编号作为不截断的前缀单独渲染，只截断后面的名称。
 
+横向滚动只出现在写了 `overflow-x-auto`（或 `overflow-auto`）的元素上。只写 `overflow-y-auto` 的滚动区，浏览器会把它的横向溢出也算成可滚动：内容宽于它时，它会横向滚动，而不是报错或裁切。弹层的 Body 和画布里的各栏都是这种滚动区，里面的长串、长名称与按钮行要折行、截断或随容器收窄。溢出探针把没有声明的横向滚动报为缺陷；确需横向滚动的区域写 `overflow-x-auto` 声明，探针按这个类名识别。
+
 ## 滚动条
 
 ### 滚动条始终可见，样式只在 `index.css` 中定义
 
-滚动条宽 10px，可见滑块 6px，不自动隐藏。组件不写 `scrollbar-*` 或 `::-webkit-scrollbar` 样式：Chromium 121 起，元素一旦设置 `scrollbar-width` 或 `scrollbar-color` 就忽略 `::-webkit-scrollbar`，局部改写会让该元素退回浏览器默认样式。标准属性只通过 `@supports not selector(::-webkit-scrollbar)` 提供给 Firefox。
+滚动条宽 10px，可见滑块 6px，不自动隐藏。组件不写 `scrollbar-*` 或 `::-webkit-scrollbar` 样式：Chromium 121 起，元素一旦设置 `scrollbar-width` 或 `scrollbar-color` 就忽略 `::-webkit-scrollbar`，局部改写会让该元素退回浏览器默认样式。由 lint 守卫，`[scrollbar-gutter:stable]` 只预留槽位、不改样式，不在此列。标准属性只通过 `@supports not selector(::-webkit-scrollbar)` 提供给 Firefox。
 
 ## 编辑单元与保存
 
@@ -290,5 +314,7 @@ Markdown 正文（`StreamMarkdown`）里的代码块与表格放不下时横向�
 - 不会卸载编辑单元的跳转（如同一编辑单元的分页切换），在登记时用 `allowNavigation(to)` 放行。
 - 一次切换含多步时（如先切到分镜视图再选中分镜），把各步放进同一个 `useConfirmLeave` 的动作里。离开拦截只保留最近一次请求，分开请求时前一步会被丢掉。
 - 删除、移除这类需要二次确认的动作，离开拦截包住确认框里的确认动作，不包住打开确认框：先放弃修改再取消删除，修改会白白丢失。
+- 可能失败的动作（删除、移除这类请求）返回 `Promise<boolean>`，如实报告是否成功：请求失败、服务端要求再次确认、提交时复核到资源被占用都返回 `false`，并由动作自己提示原因。创作者选择「放弃修改」后，修改保留到动作落定，成功才丢弃；动作在途期间它自己发起的跳转不再拦截，参与外部移除保留的编辑单元也不再要求保留，动作带来的移除直接生效。同步动作仍在放行时丢弃修改。
+- 即时提交的字段（如视频单元的自由时长）除了 `useLeaveGuard`，还用 `useRetainWhile` 参与外部移除保留：同一视图里的多个保护者各自登记，任一在保护中视图就保留。
 - Agent 改动带来的自动定位、跳转等非用户发起的切换不弹拦截：先用 `useHasUnsavedChanges()` 判断，有未保存修改时直接略过。
 - 页面跳转一律经 wouter，不直接调用 `window.history` 或改写 `window.location`：绕过 wouter 的跳转不经过拦截。

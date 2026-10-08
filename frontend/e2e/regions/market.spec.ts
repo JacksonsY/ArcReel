@@ -203,13 +203,6 @@ async function settingsReady(page: Page) {
   await page.getByRole("textbox", { name: "代理前缀" }).waitFor();
 }
 
-async function animationsSettled(page: Page, role: "dialog" | "alertdialog" | "menu") {
-  // 等进场过渡结束再探测：淡入途中的半透明文字会被 axe 判为对比度不足
-  await page
-    .getByRole(role)
-    .evaluate((el) => Promise.all(el.getAnimations({ subtree: true }).map((a) => a.finished)));
-}
-
 defineRegionScenarios("市场", [
   {
     name: "首次进入：官方服务说明在 Tab 之上，没有条目时说明原因",
@@ -248,6 +241,21 @@ defineRegionScenarios("市场", [
       await page.getByRole("group", { name: "媒体类型" }).getByRole("button", { name: "图片" }).click();
       await page.getByRole("searchbox", { name: "搜索市场条目" }).fill("没有这样的条目");
       await page.getByText("没有匹配的条目").waitFor();
+    },
+  },
+  {
+    name: "从供应商或端点带着媒体类型跳入：筛选已预设为「图片」，地址不随筛选改动",
+    path: `${MARKET_PATH}&media=image`,
+    api: MANY,
+    ready: browseReady,
+    act: async (page) => {
+      const media = page.getByRole("group", { name: "媒体类型" });
+      await expect(media.getByRole("button", { name: "图片" })).toHaveAttribute("aria-pressed", "true");
+      const imageCount = ENTRIES.filter((item) => item.media_type === "image").length;
+      await expect(page.getByRole("article")).toHaveCount(imageCount);
+      await media.getByRole("button", { name: "全部" }).click();
+      await expect(page.getByRole("article")).toHaveCount(ENTRIES.length);
+      expect(new URL(page.url()).search).toBe("?section=market&media=image");
     },
   },
   {
@@ -319,7 +327,6 @@ defineRegionScenarios("市场", [
       await page.getByRole("button", { name: `「${LONG_SOURCE} 8」的更多操作` }).click();
       const menu = page.getByRole("menu");
       await expect(menu.getByRole("menuitem", { name: "删除" })).toBeInViewport({ ratio: 1 });
-      await animationsSettled(page, "menu");
     },
   },
   {
@@ -332,7 +339,6 @@ defineRegionScenarios("市场", [
       await page.getByRole("menuitem", { name: "删除" }).click();
       const confirm = page.getByRole("alertdialog");
       await expect(confirm.getByRole("button", { name: "删除" })).toBeInViewport({ ratio: 1 });
-      await animationsSettled(page, "alertdialog");
     },
   },
   {
@@ -345,7 +351,6 @@ defineRegionScenarios("市场", [
       await page.getByRole("menuitem", { name: "重命名" }).click();
       const dialog = page.getByRole("dialog", { name: "重命名市场源" });
       await expect(dialog.getByRole("textbox", { name: "显示名称" })).toHaveValue(`${LONG_SOURCE} 2`);
-      await animationsSettled(page, "dialog");
     },
   },
   {
@@ -359,7 +364,6 @@ defineRegionScenarios("市场", [
       const install = dialog.getByRole("button", { name: "确认安装" });
       await expect(install).toBeEnabled();
       await expect(install).toBeInViewport({ ratio: 1 });
-      await animationsSettled(page, "dialog");
     },
     screenshot: { name: "market-install-dialog", target: (page) => page.getByRole("dialog") },
   },
