@@ -274,7 +274,6 @@ class OptionsAssembler:
         locale: str = DEFAULT_LOCALE,
         stderr: Callable[[str], None] | None = None,
         session_id: str | None = None,
-        agent_turn: Callable[[], str | None] | None = None,
     ) -> Any:
         """Build ClaudeAgentOptions for a session.
 
@@ -364,7 +363,6 @@ class OptionsAssembler:
             project_name=project_name,
             data_root=self.data_root,
             user_id=self._user_id_provider(),
-            agent_turn=agent_turn,
         )
 
         return ClaudeAgentOptions(
